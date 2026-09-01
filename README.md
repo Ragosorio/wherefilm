@@ -229,6 +229,31 @@ Lo que sigue está en [`docs/PLAN.md`](docs/PLAN.md) §9 — sobre todo medir re
 español contra inglés en un archivo real antes de decidir si vale la pena subir
 a SigLIP 2, y el indexado incremental con FSEvents.
 
+## La página
+
+`site/` es un proyecto Astro 7 + Tailwind 4, estático y sin JavaScript de
+cliente. La ventana de la app en el hero no es una captura: está reconstruida en
+CSS ([`AppMockup.astro`](site/src/components/AppMockup.astro)), así que se
+mantiene nítida en retina, refluye en un teléfono con container queries, pesa
+kilobytes en lugar de megabytes, y no redistribuye los fondos de pantalla de
+Apple que se usan como material de prueba. La consulta, los nombres y los
+porcentajes que muestra son la salida real de `verify-release.sh`.
+
+```bash
+cd site
+npm install
+npm run dev        # http://localhost:4321
+npm run build      # → site/dist
+```
+
+Para desplegarla en Vercel: importar el repositorio y poner **Root Directory =
+`site`**. Vercel detecta Astro solo; el resto está en
+[`site/vercel.json`](site/vercel.json).
+
+Los iconos y la tarjeta de Open Graph se derivan del icono maestro con
+`swift Scripts/make-brand-assets.swift` — antes la página servía el master de
+1254 px como logo de 40 px, 1,4 MB para dibujar un favicon.
+
 ## Documentación
 
 - [`docs/PLAN.md`](docs/PLAN.md) — el plan completo: decisiones, fases, riesgos, costos
