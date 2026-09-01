@@ -14,9 +14,13 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 CONFIG="${CONFIG:-release}"
-VERSION="${VERSION:-0.1.2}"
+VERSION="${VERSION:-0.2.0}"
 APP="build/WhereFilm.app"
 MODELS_DIR="${WHEREFILM_MODELS_DIR:-$HOME/Library/Application Support/WhereFilm/Models}"
+MIN_MACOS="${WHEREFILM_MIN_MACOS:-26.0}"
+# One bundle for both families. Override only for local diagnostics, e.g.
+# WHEREFILM_ARCHS="x86_64" ./Scripts/make-app.sh
+ARCHITECTURES="${WHEREFILM_ARCHS:-arm64 x86_64}"
 
 REQUIRED_MODEL_FILES=(
   "mobileclip_s0_image.mlmodelc"
@@ -38,15 +42,40 @@ done
   echo "Missing MobileCLIP license copy" >&2; exit 1;
 }
 
-echo "Building ($CONFIG)…"
-swift build -c "$CONFIG" --product WhereFilmApp
+BUILT_BINARIES=()
+for architecture in $ARCHITECTURES; do
+  case "$architecture" in
+    arm64|x86_64) ;;
+    *) echo "Unsupported architecture: $architecture" >&2; exit 1 ;;
+  esac
 
-BINARY="$(swift build -c "$CONFIG" --show-bin-path)/WhereFilmApp"
-[[ -f "$BINARY" ]] || { echo "Build produced no binary at $BINARY" >&2; exit 1; }
+  scratch=".build-$architecture"
+  triple="$architecture-apple-macosx$MIN_MACOS"
+  echo "Building $architecture ($CONFIG)…"
+  swift build -c "$CONFIG" \
+    --triple "$triple" \
+    --scratch-path "$scratch" \
+    --product WhereFilmApp
+
+  binary="$scratch/$architecture-apple-macosx/$CONFIG/WhereFilmApp"
+  [[ -f "$binary" ]] || {
+    echo "Build produced no $architecture binary at $binary" >&2
+    exit 1
+  }
+  BUILT_BINARIES+=("$binary")
+done
 
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-cp "$BINARY" "$APP/Contents/MacOS/WhereFilm"
+if [[ ${#BUILT_BINARIES[@]} -eq 1 ]]; then
+  cp "${BUILT_BINARIES[0]}" "$APP/Contents/MacOS/WhereFilm"
+else
+  lipo -create "${BUILT_BINARIES[@]}" -output "$APP/Contents/MacOS/WhereFilm"
+fi
+
+for architecture in $ARCHITECTURES; do
+  lipo "$APP/Contents/MacOS/WhereFilm" -verify_arch "$architecture"
+done
 cp "Brand/WhereFilm.icns" "$APP/Contents/Resources/WhereFilm.icns"
 mkdir -p "$APP/Contents/Resources/Models" "$APP/Contents/Resources/Licenses"
 for model_file in "${REQUIRED_MODEL_FILES[@]}"; do
@@ -68,7 +97,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>CFBundleIconFile</key>        <string>WhereFilm.icns</string>
     <key>CFBundleShortVersionString</key> <string>$VERSION</string>
     <key>CFBundleVersion</key>         <string>1</string>
-    <key>LSMinimumSystemVersion</key>  <string>26.0</string>
+    <key>LSMinimumSystemVersion</key>  <string>$MIN_MACOS</string>
     <key>LSApplicationCategoryType</key> <string>public.app-category.photography</string>
     <key>NSHighResolutionCapable</key> <true/>
     <key>NSHumanReadableCopyright</key> <string>Copyright © 2026 WhereFilm</string>
@@ -91,6 +120,7 @@ codesign --force --deep --sign - --timestamp=none "$APP"
 codesign --verify --deep --strict "$APP"
 
 echo "Built complete app: $APP"
+echo "Architectures: $(lipo -archs "$APP/Contents/MacOS/WhereFilm")"
 echo "Included on-device models from: $MODELS_DIR"
 
 if [[ "${1:-}" == "--open" ]]; then

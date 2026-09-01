@@ -32,6 +32,7 @@ enum Snapshot {
         let budget = Double(environment("WHEREFILM_QA_TIMEOUT") ?? "") ?? 240
         let deadline = Date().addingTimeInterval(budget)
         let expectedQuery = environment("WHEREFILM_DEMO_QUERY")
+        let expectedResult = environment("WHEREFILM_QA_EXPECT_RESULT")
 
         // Two ordered phases, not one condition.
         //
@@ -140,6 +141,10 @@ enum Snapshot {
             } else if !expectsEmpty, model.results.isEmpty {
                 failures.append("the demo query returned nothing")
             }
+        }
+        if let expectedResult,
+           !model.results.contains(where: { $0.displayName == expectedResult }) {
+            failures.append("expected result \(expectedResult) is absent from the answer")
         }
         if model.results.contains(where: { $0.previewPath == nil }) {
             failures.append("a result has no cached preview, so its card would render blank")

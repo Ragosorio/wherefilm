@@ -7,7 +7,7 @@
 <p align="center">
   <strong>Spotlight semántico local para video y foto, nativo de macOS.</strong><br>
   <a href="https://github.com/Ragosorio/wherefilm/releases/latest">Descargar para Mac</a>
-  · Apple Silicon · macOS 26
+  · Apple Silicon + Intel · macOS 26
 </p>
 
 ---
@@ -69,7 +69,9 @@ en el mismo archivo, con seis segundos de diferencia.
 
 ## Empezar
 
-Requiere macOS 26 (Tahoe) o superior, Apple Silicon, y Xcode 26.
+La app distribuida requiere macOS 26 (Tahoe) o superior e incluye un ejecutable
+universal para Apple Silicon e Intel. Para compilar el proyecto se necesita
+Xcode 26.
 
 ```bash
 ./Scripts/fetch-models.sh          # MobileCLIP-S0 + tokenizer CLIP (~105 MB)
@@ -85,8 +87,9 @@ Y la app de barra de menús, o el `.dmg` completo:
 ./Scripts/make-dmg.sh              # .dmg + .zip + SHA256SUMS
 ```
 
-`make-app.sh` copia los modelos **dentro** del bundle, así que el `.dmg`
-funciona en una Mac que nunca vio este repositorio.
+`make-app.sh` compila las slices `arm64` y `x86_64`, las une en un ejecutable
+universal y copia los modelos **dentro** del bundle, así que el `.dmg` funciona
+en una Mac compatible que nunca vio este repositorio.
 
 Para probar sin tocar tu índice real, `WHEREFILM_HOME` aísla todo:
 
@@ -231,8 +234,11 @@ a SigLIP 2, y el indexado incremental con FSEvents.
 
 ## La página
 
-`site/` es un proyecto Astro 7 + Tailwind 4, estático y sin JavaScript de
-cliente. La ventana de la app en el hero no es una captura: está reconstruida en
+`site/` es un proyecto Astro 7 + Tailwind 4, estático salvo por una mejora
+progresiva pequeña que distingue Mac de otras plataformas. Si el navegador
+entrega la arquitectura, también muestra Intel o Apple Silicon; la descarga es
+universal y no depende de acertar esa señal. La ventana de la app en el hero no
+es una captura: está reconstruida en
 CSS ([`AppMockup.astro`](site/src/components/AppMockup.astro)), así que se
 mantiene nítida en retina, refluye en un teléfono con container queries, pesa
 kilobytes en lugar de megabytes, y no redistribuye los fondos de pantalla de

@@ -1,13 +1,14 @@
 {
   "name": "wherefilm-site",
   "private": true,
-  "version": "0.1.2",
+  "version": "0.2.0",
   "type": "module",
   "scripts": {
     "dev": "astro dev",
     "build": "astro build",
     "preview": "astro preview",
-    "check": "astro check"
+    "check": "astro check",
+    "test": "node --test src/scripts/platform-detection.test.mjs"
   },
   "dependencies": {
     "@tailwindcss/vite": "4.3.3",

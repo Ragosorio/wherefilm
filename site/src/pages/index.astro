@@ -2,8 +2,8 @@
 import Layout from '../layouts/Layout.astro';
 import AppMockup from '../components/AppMockup.astro';
 
-const downloadURL = 'https://github.com/Ragosorio/wherefilm/releases/download/v0.1.2/WhereFilm-0.1.2-macOS.dmg';
-const releaseURL = 'https://github.com/Ragosorio/wherefilm/releases/tag/v0.1.2';
+const downloadURL = 'https://github.com/Ragosorio/wherefilm/releases/download/v0.2.0/WhereFilm-0.2.0-macOS-universal.dmg';
+const releaseURL = 'https://github.com/Ragosorio/wherefilm/releases/tag/v0.2.0';
 ---
 
 <Layout
@@ -14,7 +14,7 @@ const releaseURL = 'https://github.com/Ragosorio/wherefilm/releases/tag/v0.1.2';
     <nav class="shell flex h-[76px] items-center" aria-label="Navegación principal">
       <a class="flex items-center gap-3 no-underline" href="#inicio" aria-label="WhereFilm, inicio">
         <img src="/brand/wherefilm-icon.png" width="40" height="40" alt="" class="rounded-[11px] shadow-xl" />
-        <span class="text-[13px] font-semibold tracking-[0.2em]">WHEREFILM</span>
+        <span class="brand-wordmark text-[13px] font-semibold tracking-[0.2em]">WHEREFILM</span>
       </a>
 
       <div class="ml-auto hidden items-center gap-8 text-sm text-white/64 md:flex">
@@ -23,8 +23,8 @@ const releaseURL = 'https://github.com/Ragosorio/wherefilm/releases/tag/v0.1.2';
         <a class="no-underline transition hover:text-white" href="#instalar">Instalar</a>
       </div>
 
-      <a class="button-secondary ml-5 !min-h-[42px] !px-5" href={downloadURL} aria-label="Descargar WhereFilm para Mac">
-        Descargar
+      <a class="button-secondary ml-auto !min-h-[42px] !w-auto !px-5" href={downloadURL} aria-label="Descargar WhereFilm para Mac" data-download data-mac-label="Descargar" data-non-mac-label="Solo para Mac">
+        <span data-download-label>Descargar</span>
         <span aria-hidden="true">↓</span>
       </a>
     </nav>
@@ -39,15 +39,17 @@ const releaseURL = 'https://github.com/Ragosorio/wherefilm/releases/tag/v0.1.2';
           Describe lo que recuerdas —una escena, un lugar o una frase— y WhereFilm encuentra el momento exacto entre tus fotos y videos.
         </p>
         <div class="mt-9 flex flex-col justify-center gap-3 sm:flex-row">
-          <a class="button-primary" href={downloadURL}>
+          <a class="button-primary" href={downloadURL} data-download data-mac-label="Descargar para Mac" data-non-mac-label="Disponible solo para Mac">
             <svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
               <path d="M18.71 12.35c.03-2.92 2.39-4.32 2.5-4.39a5.08 5.08 0 0 0-4-2.16c-1.68-.18-3.31 1.01-4.17 1.01-.88 0-2.2-.99-3.63-.96a5.3 5.3 0 0 0-4.46 2.72c-1.93 3.34-.49 8.25 1.36 10.96.93 1.33 2.01 2.81 3.44 2.75 1.4-.06 1.93-.88 3.63-.88 1.68 0 2.18.88 3.64.85 1.5-.03 2.45-1.33 3.34-2.67a10.96 10.96 0 0 0 1.53-3.12 4.83 4.83 0 0 1-3.18-4.11ZM16.12 4.02A4.9 4.9 0 0 0 17.24.5a5.03 5.03 0 0 0-3.25 1.67 4.66 4.66 0 0 0-1.15 3.39 4.17 4.17 0 0 0 3.28-1.54Z" />
             </svg>
-            Descargar para Mac
+            <span data-download-label>Descargar para Mac</span>
           </a>
           <a class="button-secondary" href="#como-funciona">Ver cómo funciona</a>
         </div>
-        <p class="mt-4 text-xs tracking-wide text-white/42">Apple Silicon · macOS 26 · Vista previa experimental para uso personal</p>
+        <p id="compatibilidad" class="platform-status mt-4 text-xs tracking-wide text-white/48" data-platform-status aria-live="polite">
+          Una sola descarga para Apple Silicon e Intel · macOS 26 o posterior
+        </p>
       </div>
 
       <div class="reveal-late relative mt-20 w-full">
@@ -156,7 +158,7 @@ const releaseURL = 'https://github.com/Ragosorio/wherefilm/releases/tag/v0.1.2';
             La aplicación completa viene dentro de una imagen de disco, como cualquier app de Mac. No necesita Terminal ni descargas adicionales.
           </p>
           <div class="mt-9 flex flex-col gap-3 sm:flex-row">
-            <a class="button-primary" href={downloadURL}>Descargar WhereFilm</a>
+            <a class="button-primary" href={downloadURL} data-download data-mac-label="Descargar WhereFilm" data-non-mac-label="Disponible solo para Mac"><span data-download-label>Descargar WhereFilm</span></a>
             <a class="button-secondary" href={releaseURL}>Ver esta versión</a>
           </div>
         </div>
@@ -210,7 +212,7 @@ const releaseURL = 'https://github.com/Ragosorio/wherefilm/releases/tag/v0.1.2';
         <h2 class="mx-auto mt-9 max-w-4xl text-[clamp(2.8rem,6vw,6.2rem)] font-medium leading-[0.94] tracking-[-0.06em] silver-text">
           Vuelve a encontrar lo que ya creaste.
         </h2>
-        <a class="button-primary mt-10" href={downloadURL}>Descargar para Mac</a>
+        <a class="button-primary mt-10" href={downloadURL} data-download data-mac-label="Descargar para Mac" data-non-mac-label="Disponible solo para Mac"><span data-download-label>Descargar para Mac</span></a>
       </div>
     </section>
   </main>
@@ -226,3 +228,69 @@ const releaseURL = 'https://github.com/Ragosorio/wherefilm/releases/tag/v0.1.2';
     </div>
   </footer>
 </Layout>
+
+<script>
+  import { classifyClientPlatform } from '../scripts/platform-detection.mjs';
+
+  type UserAgentData = {
+    platform?: string;
+    getHighEntropyValues?: (hints: string[]) => Promise<{ architecture?: string; bitness?: string }>;
+  };
+
+  const nav = navigator as Navigator & { userAgentData?: UserAgentData };
+  const downloadLinks = [...document.querySelectorAll<HTMLAnchorElement>('[data-download]')];
+  const status = document.querySelector<HTMLElement>('[data-platform-status]');
+  const reportedPlatform = nav.userAgentData?.platform ?? nav.platform ?? '';
+  const client = classifyClientPlatform({
+    platform: reportedPlatform,
+    userAgent: nav.userAgent,
+    maxTouchPoints: nav.maxTouchPoints,
+  });
+
+  const setButtonLabel = (link: HTMLAnchorElement, label: string) => {
+    const target = link.querySelector<HTMLElement>('[data-download-label]');
+    if (target) target.textContent = label;
+  };
+
+  if (!client.isMac) {
+    document.documentElement.dataset.platform = 'not-mac';
+    for (const link of downloadLinks) {
+      setButtonLabel(link, link.dataset.nonMacLabel ?? 'Disponible solo para Mac');
+      link.href = '#compatibilidad';
+      link.classList.add('button-unavailable');
+      link.setAttribute('aria-disabled', 'true');
+      link.setAttribute('aria-label', 'WhereFilm está disponible solo para Mac');
+    }
+    if (status) {
+      status.textContent = 'WhereFilm solo está disponible para Mac. Visita esta página desde una Mac compatible para descargarlo.';
+      status.classList.add('platform-status-warning');
+    }
+  } else {
+    document.documentElement.dataset.platform = 'mac';
+    if (status) {
+      status.textContent = 'Descarga universal para Apple Silicon e Intel · requiere macOS 26 o posterior';
+    }
+
+    const highEntropy = nav.userAgentData?.getHighEntropyValues;
+    if (highEntropy && status) {
+      highEntropy.call(nav.userAgentData, ['architecture', 'bitness'])
+        .then(({ architecture }) => {
+          const detected = classifyClientPlatform({
+            platform: reportedPlatform,
+            userAgent: nav.userAgent,
+            maxTouchPoints: nav.maxTouchPoints,
+            architecture,
+          });
+          if (detected.architecture === 'apple-silicon') {
+            status.textContent = 'Apple Silicon detectado · descarga universal lista para tu Mac · macOS 26 o posterior';
+          } else if (detected.architecture === 'intel') {
+            status.textContent = 'Intel detectado · descarga universal lista para tu Mac · macOS 26 o posterior';
+          }
+        })
+        .catch(() => {
+          // Architecture is a privacy-sensitive client hint. Universal delivery
+          // remains correct when the browser withholds it.
+        });
+    }
+  }
+</script>

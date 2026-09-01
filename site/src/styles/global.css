@@ -159,6 +159,24 @@ a {
   box-shadow: 0 20px 52px rgb(113 138 190 / 0.4), inset 0 1px white;
 }
 
+.button-unavailable,
+.button-unavailable:hover {
+  border-color: rgb(181 185 188 / 0.14);
+  background: rgb(40 48 65 / 0.42);
+  color: rgb(244 246 248 / 0.62);
+  box-shadow: none;
+  transform: none;
+}
+
+.platform-status {
+  min-height: 1.25rem;
+  text-wrap: balance;
+}
+
+.platform-status-warning {
+  color: rgb(218 222 228 / 0.72);
+}
+
 .hairline {
   border-top: 1px solid var(--line);
 }
@@ -206,6 +224,12 @@ a {
   .button-primary,
   .button-secondary {
     width: 100%;
+  }
+}
+
+@media (max-width: 360px) {
+  .brand-wordmark {
+    display: none;
   }
 }
 

@@ -36,8 +36,10 @@ installed before it runs. `.cpuAndNeuralEngine` keeps the indexer off the GPU
 that the editor is already saturating. Speech models are system-managed, so they
 inflate neither the bundle nor the app's resident memory.
 
-**Bad.** macOS 26+ only, Apple Silicon in practice. No reuse of the Python
-ecosystem — a new model means a `coremltools` conversion step. Fewer people can
-contribute to a Swift codebase than to a Python one.
+**Bad.** macOS 26+ only. Intel Macs run the same universal application through
+the native `x86_64` slice, but visual inference falls back to CPU when no Neural
+Engine is present and is therefore slower. No reuse of the Python ecosystem — a
+new model means a `coremltools` conversion step. Fewer people can contribute to
+a Swift codebase than to a Python one.
 
 **Accepted.** The target is one person's Mac, not a fleet.

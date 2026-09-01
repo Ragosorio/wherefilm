@@ -22,9 +22,9 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-VERSION="${VERSION:-0.1.2}"
-DMG_NAME="WhereFilm-$VERSION-macOS.dmg"
-ZIP_NAME="WhereFilm-$VERSION-macOS.zip"
+VERSION="${VERSION:-0.2.0}"
+DMG_NAME="WhereFilm-$VERSION-macOS-universal.dmg"
+ZIP_NAME="WhereFilm-$VERSION-macOS-universal.zip"
 DMG="build/$DMG_NAME"
 ZIP="build/$ZIP_NAME"
 STAGING_ROOT="$(mktemp -d /private/tmp/wherefilm-dmg.XXXXXX)"
@@ -35,7 +35,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-./Scripts/make-app.sh
+VERSION="$VERSION" ./Scripts/make-app.sh
 
 mkdir -p "$STAGING"
 ditto "build/WhereFilm.app" "$STAGING/WhereFilm.app"
