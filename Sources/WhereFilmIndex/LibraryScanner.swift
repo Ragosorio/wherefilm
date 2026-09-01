@@ -1,0 +1,215 @@
+import Foundation
+import WhereFilmCore
+
+public struct ScanReport: Sendable {
+    public var filesSeen = 0
+    public var newAssets = 0
+    public var newLocations = 0
+    public var rebound = 0
+    public var markedMissing = 0
+    public var skipped = 0
+    public var errors: [String] = []
+}
+
+/// Walks a folder or a whole drive and turns files into assets and locations.
+///
+/// The originals are never copied or moved. This is the *catalog in place* model
+/// that professional MAM systems settle on: point at the storage that already
+/// exists, keep the intelligence separately, and let the footage stay where it
+/// lives.
+public struct LibraryScanner: Sendable {
+    public struct Options: Sendable {
+        public var followSymlinks = false
+        public var skipHiddenFiles = true
+        /// Folders that are never worth walking into.
+        public var excludedDirectoryNames: Set<String> = [
+            ".Trashes", ".Spotlight-V100", ".fseventsd", ".TemporaryItems",
+            "CachedFiles", "Proxies", "Render Files", "node_modules",
+        ]
+        /// Ignore stubs. A 4 KB .mov is a placeholder, not footage — but a
+        /// thumbnail-sized HEIC is still a real photo, so the floors differ.
+        public var minimumVideoSize: Int64 = 64 * 1024
+        public var minimumImageSize: Int64 = 2 * 1024
+        public var enqueueTranscription = true
+
+        public init() {}
+    }
+
+    let store: IndexStore
+    let volumes: VolumeRegistry
+    let probe = MediaProbe()
+    public var options: Options
+
+    public init(store: IndexStore, volumes: VolumeRegistry = VolumeRegistry(),
+                options: Options = Options()) {
+        self.store = store
+        self.volumes = volumes
+        self.options = options
+    }
+
+    /// Refreshes which volumes are mounted. Unplugging a drive makes its files
+    /// `offline` — never `missing`, and never forgotten.
+    public func syncVolumes() throws {
+        let mounted = volumes.mountedVolumes()
+        for volume in mounted {
+            let existing = try store.volume(uuid: volume.uuid)
+            try store.upsertVolume(Volume(
+                volumeUUID: volume.uuid,
+                name: volume.name,
+                fsType: volume.fsType,
+                isOnline: true,
+                lastSeenAt: Date(),
+                bookmark: existing?.bookmark))
+        }
+        try store.markVolumes(online: Set(mounted.map(\.uuid)))
+    }
+
+    public func scan(root: URL,
+                     progress: (@Sendable (Int, URL) -> Void)? = nil) async throws -> ScanReport {
+        try syncVolumes()
+
+        var report = ScanReport()
+        guard let resolvedRoot = volumes.resolve(root) else {
+            report.errors.append("Could not determine which volume \(root.path) lives on.")
+            return report
+        }
+
+        let keys: [URLResourceKey] = [
+            .isRegularFileKey, .isDirectoryKey, .fileSizeKey,
+            .contentModificationDateKey, .isHiddenKey,
+        ]
+        var enumeratorOptions: FileManager.DirectoryEnumerationOptions = [.skipsPackageDescendants]
+        if options.skipHiddenFiles { enumeratorOptions.insert(.skipsHiddenFiles) }
+
+        guard let enumerator = FileManager.default.enumerator(
+            at: root, includingPropertiesForKeys: keys, options: enumeratorOptions)
+        else {
+            report.errors.append("Could not read \(root.path).")
+            return report
+        }
+
+        var seenPaths: Set<String> = []
+
+        while let next = enumerator.nextObject() {
+            guard let url = next as? URL else { continue }
+            if options.excludedDirectoryNames.contains(url.lastPathComponent) {
+                enumerator.skipDescendants()
+                continue
+            }
+            guard let values = try? url.resourceValues(forKeys: Set(keys)),
+                  values.isRegularFile == true else { continue }
+            guard let kind = MediaProbe.mediaType(for: url) else { continue }
+
+            let fileSize = Int64(values.fileSize ?? 0)
+            let floor = kind == .image ? options.minimumImageSize : options.minimumVideoSize
+            guard fileSize >= floor else {
+                report.skipped += 1
+                continue
+            }
+
+            report.filesSeen += 1
+            progress?(report.filesSeen, url)
+
+            do {
+                let outcome = try await ingest(
+                    url: url, fileSize: fileSize,
+                    modifiedAt: values.contentModificationDate,
+                    seenPaths: &seenPaths)
+                switch outcome {
+                case .newAsset: report.newAssets += 1
+                case .newLocation: report.newLocations += 1
+                case .rebound: report.rebound += 1
+                }
+            } catch {
+                report.errors.append("\(url.lastPathComponent): \(error.localizedDescription)")
+            }
+
+            // The scanner is background work; let anything else on the machine
+            // have the CPU whenever it wants it.
+            await Task.yield()
+        }
+
+        // Anything under the folder we just walked that we didn't see is gone
+        // from disk. Scoping to that prefix is what keeps scanning one folder
+        // from declaring the rest of the drive missing.
+        report.markedMissing = try store.markMissing(
+            volumeUUID: resolvedRoot.volume.uuid,
+            pathPrefix: resolvedRoot.relativePath,
+            seenPaths: seenPaths)
+        // Runs last, so a file that moved within this scan ends up with exactly
+        // one location instead of a live one plus a stale one.
+        _ = try store.pruneRedundantMissingLocations()
+
+        return report
+    }
+
+    enum IngestOutcome {
+        case newAsset
+        case newLocation
+        case rebound
+    }
+
+    func ingest(url: URL, fileSize: Int64, modifiedAt: Date?,
+                seenPaths: inout Set<String>) async throws -> IngestOutcome {
+        guard let resolved = volumes.resolve(url) else {
+            throw ScanError.unresolvedVolume(url)
+        }
+        seenPaths.insert(resolved.relativePath)
+
+        let info = try await probe.probe(url: url)
+        let contentKey = try ContentKey.quick(
+            url: url, fileSize: fileSize,
+            durationSeconds: info.durationSeconds, codec: info.codec)
+
+        // The same footage on an SSD, a backup drive and a NAS is one asset with
+        // three locations — not three videos.
+        if let existing = try store.asset(contentKey: contentKey), let assetID = existing.assetID {
+            let hadLocation = try store.locations(assetID: assetID)
+                .contains { $0.volumeUUID == resolved.volume.uuid && $0.relativePath == resolved.relativePath }
+            try store.upsertLocation(Location(
+                assetID: assetID, volumeUUID: resolved.volume.uuid,
+                relativePath: resolved.relativePath, fileSize: fileSize,
+                modifiedAt: modifiedAt, availability: .online))
+            return hadLocation ? .rebound : .newLocation
+        }
+
+        let asset = try store.insert(Asset(
+            contentKey: contentKey,
+            mediaType: info.mediaType,
+            durationSeconds: info.durationSeconds,
+            width: info.width, height: info.height,
+            createdAt: info.createdAt,
+            cameraMake: info.cameraMake, cameraModel: info.cameraModel,
+            displayName: url.lastPathComponent))
+
+        guard let assetID = asset.assetID else { throw ScanError.insertFailed }
+
+        try store.upsertLocation(Location(
+            assetID: assetID, volumeUUID: resolved.volume.uuid,
+            relativePath: resolved.relativePath, fileSize: fileSize,
+            modifiedAt: modifiedAt, availability: .online))
+
+        var tasks: [JobTask] = [.metadata, .visual]
+        if options.enqueueTranscription && info.hasAudio && info.mediaType != .image {
+            tasks.append(.transcribe)
+        }
+        try store.enqueue(assetID: assetID, tasks: tasks)
+
+        return .newAsset
+    }
+
+}
+
+public enum ScanError: Error, LocalizedError {
+    case unresolvedVolume(URL)
+    case insertFailed
+
+    public var errorDescription: String? {
+        switch self {
+        case .unresolvedVolume(let url):
+            "Could not determine which volume \(url.path) lives on."
+        case .insertFailed:
+            "Failed to create the asset record."
+        }
+    }
+}

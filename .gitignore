@@ -1,0 +1,25 @@
+.build/
+.swiftpm/
+build/
+*.xcodeproj
+*.xcworkspace
+.DS_Store
+
+# Models are downloaded by Scripts/fetch-models.sh — hundreds of megabytes,
+# Apple-ASCL licensed, and not ours to redistribute.
+Models/
+*.mlmodelc/
+*.mlpackage/
+clip-vocab.json
+clip-merges.txt
+
+# Index artefacts
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.usearch
+*.usearch.meta
+
+# Local agent tooling, not part of the project
+.agents/
+.claude/

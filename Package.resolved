@@ -1,0 +1,42 @@
+{
+  "originHash" : "f716c7242fa903beaf852e9877a55a4b06e4ba1b531f2503510368c786d06c90",
+  "pins" : [
+    {
+      "identity" : "grdb.swift",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/groue/GRDB.swift.git",
+      "state" : {
+        "revision" : "b83108d10f42680d78f23fe4d4d80fc88dab3212",
+        "version" : "7.11.1"
+      }
+    },
+    {
+      "identity" : "numkong",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/ashvardanian/NumKong",
+      "state" : {
+        "revision" : "928a2143ac3370547f833eeb38dbd736f7d54d5e",
+        "version" : "7.8.1"
+      }
+    },
+    {
+      "identity" : "swift-argument-parser",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/apple/swift-argument-parser.git",
+      "state" : {
+        "revision" : "6a52f3251125d74daf04fcbd5e6f08a75d074382",
+        "version" : "1.8.2"
+      }
+    },
+    {
+      "identity" : "usearch",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/unum-cloud/usearch.git",
+      "state" : {
+        "revision" : "f91fe5bc000222aa1af6e91daf78c2bb20b0c90e",
+        "version" : "2.26.2"
+      }
+    }
+  ],
+  "version" : 3
+}
