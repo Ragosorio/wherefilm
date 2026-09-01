@@ -1,0 +1,99 @@
+#!/bin/bash
+#
+# Builds the complete app and the drag-to-Applications disk image people expect
+# from a Mac app, plus a ZIP fallback.
+#
+#   ./Scripts/make-dmg.sh
+#   VERSION=0.2.0 ./Scripts/make-dmg.sh
+#
+# On signing: this edition is ad-hoc signed, not signed with a paid Apple
+# Developer ID and not notarized. That is a deliberate, stated constraint, and it
+# has one visible consequence — verified, not assumed, by stamping a real
+# download quarantine on the result and asking Gatekeeper:
+#
+#   spctl -a -vvv WhereFilm.app  →  rejected
+#
+# So the first launch on someone else's Mac needs one manual approval in
+# System Settings → Privacy & Security. There is no free substitute for
+# Developer ID + notarization, and nothing here tries to disable or work around
+# Gatekeeper: the app is simply approved once, by the person who owns the Mac.
+
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+
+VERSION="${VERSION:-0.1.0}"
+DMG="build/WhereFilm-$VERSION-macOS.dmg"
+ZIP="build/WhereFilm-$VERSION-macOS.zip"
+STAGING_ROOT="$(mktemp -d /private/tmp/wherefilm-dmg.XXXXXX)"
+STAGING="$STAGING_ROOT/WhereFilm"
+
+cleanup() {
+  rm -rf "$STAGING_ROOT"
+}
+trap cleanup EXIT
+
+./Scripts/make-app.sh
+
+mkdir -p "$STAGING"
+ditto "build/WhereFilm.app" "$STAGING/WhereFilm.app"
+ln -s /Applications "$STAGING/Applications"
+
+# The mounted volume shows the app's own icon instead of a generic disk. Small
+# thing; it is most of the difference between a download that feels finished and
+# one that feels improvised.
+cp "Brand/WhereFilm.icns" "$STAGING/.VolumeIcon.icns"
+SetFile -a C "$STAGING" 2>/dev/null || true
+
+# Named to sort first in the Finder window, and written for someone who has
+# never been asked to approve an app before.
+cat > "$STAGING/1 · LÉEME PRIMERO.txt" <<'README'
+WHEREFILM
+Encuentra tus fotos y videos describiéndolos con tus palabras.
+
+
+CÓMO INSTALARLA
+
+1. Arrastra WhereFilm a la carpeta Applications, aquí al lado.
+2. Abre WhereFilm desde Applications.
+3. La primera vez, tu Mac dirá que no puede comprobar quién la hizo.
+   Es normal: esta versión no paga la licencia de distribución de Apple.
+   Pulsa "Aceptar" y sigue con el paso 4.
+4. Abre  Configuración del Sistema › Privacidad y seguridad.
+   Baja hasta el aviso sobre WhereFilm y pulsa "Abrir de todas formas".
+5. Confirma "Abrir". Listo — no tendrás que repetirlo nunca más.
+
+
+CÓMO USARLA
+
+· WhereFilm vive en la barra de menús, arriba a la derecha.
+· Pulsa ⌘ + ⇧ + Espacio para buscar en cualquier momento.
+· Añade una carpeta o un disco y deja que trabaje en segundo plano.
+· Escribe lo que recuerdas: "atardecer frente al mar",
+  "carretera entre árboles", "donde hablaron del presupuesto".
+
+
+TU ARCHIVO NO SALE DE TU MAC
+
+No hay nube, no hay cuenta y no hay copias. Tus originales se quedan
+exactamente donde están; WhereFilm solo guarda un índice y unas vistas
+previas pequeñas, en esta Mac.
+README
+
+hdiutil create \
+  -volname "WhereFilm" \
+  -srcfolder "$STAGING" \
+  -ov \
+  -format UDZO \
+  "$DMG"
+
+ditto -c -k --sequesterRsrc --keepParent "build/WhereFilm.app" "$ZIP"
+shasum -a 256 "$DMG" "$ZIP" > "build/SHA256SUMS.txt"
+
+echo
+echo "Built:"
+ls -lh "$DMG" "$ZIP" "build/SHA256SUMS.txt"
+echo
+echo "Signing (expected for this edition):"
+codesign -dv "build/WhereFilm.app" 2>&1 | grep -E "^Signature|^TeamIdentifier" || true
+echo "  → first launch elsewhere needs one approval in Privacy & Security."

@@ -1,10 +1,27 @@
-# WhereFilm
+<p align="center">
+  <img src="site/public/brand/icon-256.png" width="112" height="112" alt="">
+</p>
 
-**Spotlight semántico local para video y foto, nativo de macOS.**
+<h1 align="center">WhereFilm</h1>
+
+<p align="center">
+  <strong>Spotlight semántico local para video y foto, nativo de macOS.</strong><br>
+  <a href="https://github.com/Ragosorio/wherefilm/releases/latest">Descargar para Mac</a>
+  · Apple Silicon · macOS 26
+</p>
+
+---
 
 Describe una escena o una frase que alguien dijo, y encuentra el **momento**
 exacto — no el archivo. Todo local, sin servidores, sin API, sin costo por
 consulta. Y funciona aunque el disco esté desconectado.
+
+> **Si solo quieres usarla:** baja el `.dmg` de la
+> [última versión](https://github.com/Ragosorio/wherefilm/releases/latest),
+> arrastra WhereFilm a Applications y ábrela. Trae los modelos dentro, así que
+> no hay Terminal ni una segunda descarga. La primera vez macOS pedirá una
+> aprobación en *Privacidad y seguridad* — está explicado
+> [más abajo](#primera-apertura-y-los-99-de-apple).
 
 ```
 $ wherefilm search "el chavo de playera azul que habló del presupuesto"
@@ -61,11 +78,15 @@ swift run wherefilm scan ~/Movies --index
 swift run wherefilm search "atardecer en la playa"
 ```
 
-Y la app de barra de menús:
+Y la app de barra de menús, o el `.dmg` completo:
 
 ```bash
-./Scripts/make-app.sh --open
+./Scripts/make-app.sh --open       # app en ./build
+./Scripts/make-dmg.sh              # .dmg + .zip + SHA256SUMS
 ```
+
+`make-app.sh` copia los modelos **dentro** del bundle, así que el `.dmg`
+funciona en una Mac que nunca vio este repositorio.
 
 Para probar sin tocar tu índice real, `WHEREFILM_HOME` aísla todo:
 
@@ -157,12 +178,51 @@ que el indexador tenga prioridad mínima y se quite de en medio.
 
 ---
 
+## Primera apertura, y los $99 de Apple
+
+Esta edición está firmada *ad-hoc*, no con un Developer ID de pago, y no está
+notarizada. La consecuencia está **medida, no supuesta**: se le pone al `.dmg`
+la misma marca de cuarentena que pone un navegador y se le pregunta al sistema.
+
+```
+$ xattr -w com.apple.quarantine "0083;…;Safari;" WhereFilm.dmg
+$ spctl -a -vvv WhereFilm.app
+WhereFilm.app: rejected
+```
+
+Así que en otra Mac la primera apertura necesita una aprobación manual:
+**Configuración del Sistema › Privacidad y seguridad › Abrir de todas formas.**
+Una sola vez, y macOS lo recuerda.
+
+No hay sustituto gratuito de Developer ID + notarización, y aquí no se intenta
+desactivar ni evadir Gatekeeper: la app simplemente se aprueba una vez, por la
+persona dueña de la Mac. Con una licencia de Apple, `make-dmg.sh` solo necesita
+cambiar la identidad de firma y añadir `notarytool`.
+
 ## Estado
 
 Funciona de punta a punta, verificado en un MacBook Air M4 con material real:
 búsqueda visual en inglés y español, transcripción en español con timestamps,
-OCR, detección de archivos movidos y borrados, previews offline. 42 pruebas
+OCR, detección de archivos movidos y borrados, previews offline. 45 pruebas
 pasando.
+
+El `.dmg` se verifica simulando una Mac limpia — sin modelos instalados y con un
+índice vacío — y dejando que la app haga todo el recorrido sola:
+
+```bash
+WHEREFILM_HOME=/tmp/fresh \
+WHEREFILM_QA_LIBRARY=/tmp/testlib \
+WHEREFILM_DEMO_QUERY="playa con olas" \
+WHEREFILM_QA_REPORT=1 \
+  build/WhereFilm.app/Contents/MacOS/WhereFilm
+```
+
+La app se autorretrata y se autoinspecciona desde su propio proceso
+([`Snapshot.swift`](Sources/WhereFilmApp/Snapshot.swift)): reporta la geometría
+de la ventana, los resultados y sus previews, y sale con código 1 si algo falla.
+Deliberadamente no usa captura de pantalla ni las APIs de accesibilidad — una
+captura fotografía lo que haya en el monitor, que es una superficie de privacidad
+que una herramienta de búsqueda no tiene por qué abrir.
 
 Lo que sigue está en [`docs/PLAN.md`](docs/PLAN.md) §9 — sobre todo medir recall
 español contra inglés en un archivo real antes de decidir si vale la pena subir

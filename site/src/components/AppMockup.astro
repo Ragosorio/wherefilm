@@ -1,0 +1,451 @@
+---
+/**
+ * The WhereFilm interface, rebuilt in markup.
+ *
+ * A bitmap screenshot was the obvious choice and the wrong one: it would ship a
+ * fixed-width image that softens on retina displays, cannot reflow on a phone,
+ * and would embed the macOS wallpapers used as test footage — Apple's artwork,
+ * not ours to redistribute. Rebuilding the same layout in CSS stays sharp at
+ * every size, weighs a few kilobytes, and keeps the thumbnails abstract.
+ *
+ * The query, the result names, the timecodes and the percentages are the real
+ * output of `WHEREFILM_QA_REPORT=1` against the test library, not invented
+ * numbers.
+ */
+interface Result {
+  name: string;
+  badge: string;
+  score: string;
+  evidence: string;
+  evidenceIcon: 'eye' | 'wave';
+  tile: string;
+}
+
+const results: Result[] = [
+  {
+    name: 'INTERVIEW_JUAN_03.mov',
+    badge: '00:10',
+    score: '28%',
+    evidence: 'La escena coincide con tu descripción',
+    evidenceIcon: 'eye',
+    tile: 'tile-sunset',
+  },
+  {
+    name: 'SUNSET_0005',
+    badge: 'Foto',
+    score: '28%',
+    evidence: 'La escena coincide con tu descripción',
+    evidenceIcon: 'eye',
+    tile: 'tile-dusk',
+  },
+  {
+    name: 'CLIFFS_0004',
+    badge: 'Foto',
+    score: '14%',
+    evidence: 'La escena coincide con tu descripción',
+    evidenceIcon: 'eye',
+    tile: 'tile-cliffs',
+  },
+];
+---
+
+<div class="mock" role="img" aria-label="La ventana de WhereFilm: la búsqueda “atardecer frente al mar” devuelve cuatro momentos ordenados por relevancia, cada uno con su minuto exacto.">
+  <div class="mock-bar">
+    <span class="dot dot-close"></span>
+    <span class="dot dot-min"></span>
+    <span class="dot dot-max"></span>
+  </div>
+
+  <div class="mock-body">
+    <header class="mock-top">
+      <img src="/brand/wherefilm-icon.png" width="34" height="34" alt="" class="mock-icon" />
+      <div class="mock-wordmark">
+        <span>WHEREFILM</span>
+        <small>Tu archivo, al alcance de una frase</small>
+      </div>
+      <span class="mock-pill">
+        <svg viewBox="0 0 24 24" width="11" height="11" fill="currentColor" aria-hidden="true"
+          ><path d="M12 2a5 5 0 0 0-5 5v3H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8a2 2 0 0 0-2-2h-1V7a5 5 0 0 0-5-5Zm-3 8V7a3 3 0 0 1 6 0v3H9Z" /></svg
+        >
+        Todo ocurre en tu Mac
+      </span>
+      <span class="mock-ghost">+ Añadir archivos</span>
+    </header>
+
+    <p class="mock-headline">Encuentra el momento. No el archivo.</p>
+
+    <div class="mock-field">
+      <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+        <circle cx="11" cy="11" r="7"></circle>
+        <path d="m20 20-3.6-3.6"></path>
+      </svg>
+      <span class="mock-query">atardecer frente al mar<i class="caret"></i></span>
+      <span class="mock-cta">Buscar</span>
+    </div>
+
+    <div class="mock-scope">
+      <span class="mock-scope-label">ALCANCE</span>
+      <span class="segments">
+        <span>Precisa</span><span class="on">Equilibrada</span><span>Amplia</span>
+      </span>
+      <span class="mock-hint">La mejor opción para empezar</span>
+    </div>
+
+    <div class="mock-count"><strong>4 momentos</strong> ordenados por relevancia</div>
+
+    <div class="mock-grid">
+      {
+        results.map((result) => (
+          <article class="card">
+            <div class:list={['card-tile', result.tile]}>
+              <span class="card-badge">
+                {result.badge === 'Foto' ? (
+                  <svg viewBox="0 0 24 24" width="9" height="9" fill="currentColor" aria-hidden="true"><path d="M4 6h3l2-2h6l2 2h3v13H4z" /></svg>
+                ) : (
+                  <svg viewBox="0 0 24 24" width="9" height="9" fill="currentColor" aria-hidden="true"><path d="M8 5v14l11-7z" /></svg>
+                )}
+                {result.badge}
+              </span>
+              <span class="card-score">{result.score}</span>
+            </div>
+            <div class="card-meta">
+              <p class="card-name">{result.name}</p>
+              <p class="card-evidence">
+                {result.evidenceIcon === 'eye' ? (
+                  <svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="M2 12s3.6-6 10-6 10 6 10 6-3.6 6-10 6-10-6-10-6Z" /><circle cx="12" cy="12" r="2.6" /></svg>
+                ) : (
+                  <svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="M4 12h2m3-5v10m4-14v18m4-13v8m3-5h2" /></svg>
+                )}
+                {result.evidence}
+              </p>
+              <p class="card-where">
+                <svg viewBox="0 0 24 24" width="10" height="10" fill="currentColor" aria-hidden="true"><path d="M3 6h18v7H3zm0 9h18v3H3z" /></svg>
+                Disponible en Macintosh HD
+              </p>
+            </div>
+          </article>
+        ))
+      }
+    </div>
+  </div>
+</div>
+
+<style>
+  .mock {
+    --card-radius: 14px;
+    container-type: inline-size;
+    overflow: hidden;
+    border: 1px solid rgb(181 185 188 / 0.14);
+    border-radius: 18px;
+    background: linear-gradient(163deg, #101825, #070b11 58%, #0d1220);
+    box-shadow:
+      0 50px 120px rgb(0 0 0 / 0.6),
+      inset 0 1px rgb(255 255 255 / 0.06);
+    font-size: clamp(0.5rem, 1.28cqi, 0.95rem);
+    line-height: 1.4;
+  }
+
+  /* Window chrome */
+  .mock-bar {
+    display: flex;
+    gap: 0.55em;
+    align-items: center;
+    border-bottom: 1px solid rgb(255 255 255 / 0.05);
+    padding: 1.15em 1.4em;
+  }
+
+  .dot {
+    width: 0.82em;
+    height: 0.82em;
+    border-radius: 50%;
+  }
+  .dot-close { background: #ec6a5e; }
+  .dot-min { background: #f4bf50; }
+  .dot-max { background: #61c554; }
+
+  .mock-body { padding: 0 2.1em 2.1em; }
+
+  /* Top bar */
+  .mock-top {
+    display: flex;
+    gap: 0.85em;
+    align-items: center;
+    padding: 1.5em 0 1.15em;
+  }
+
+  .mock-icon {
+    width: 2.5em;
+    height: 2.5em;
+    border-radius: 0.62em;
+    flex: none;
+  }
+
+  .mock-wordmark {
+    display: flex;
+    flex-direction: column;
+    gap: 0.1em;
+    margin-right: auto;
+  }
+
+  .mock-wordmark span {
+    font-size: 0.94em;
+    font-weight: 620;
+    letter-spacing: 0.16em;
+  }
+
+  .mock-wordmark small {
+    color: rgb(181 185 188 / 0.7);
+    font-size: 0.82em;
+  }
+
+  .mock-pill,
+  .mock-ghost {
+    display: inline-flex;
+    gap: 0.45em;
+    align-items: center;
+    flex: none;
+    border-radius: 999px;
+    font-size: 0.82em;
+    white-space: nowrap;
+  }
+
+  .mock-pill {
+    border: 1px solid rgb(181 185 188 / 0.15);
+    background: rgb(40 48 65 / 0.75);
+    padding: 0.5em 0.95em;
+    color: rgb(218 222 228 / 0.86);
+  }
+
+  .mock-ghost {
+    border: 1px solid rgb(181 185 188 / 0.19);
+    padding: 0.55em 1em;
+    color: rgb(218 222 228 / 0.74);
+  }
+
+  /* Headline + search field */
+  .mock-headline {
+    margin: 1.35em 0 0.9em;
+    font-size: 1.85em;
+    font-weight: 600;
+    letter-spacing: -0.032em;
+    text-align: center;
+  }
+
+  .mock-field {
+    display: flex;
+    gap: 0.8em;
+    align-items: center;
+    border: 1.5px solid rgb(113 138 190 / 0.72);
+    border-radius: 1.1em;
+    background: rgb(11 20 33 / 0.85);
+    padding: 0.62em 0.62em 0.62em 1.15em;
+    box-shadow: 0 0 2.6em rgb(113 138 190 / 0.2);
+    color: rgb(218 222 228 / 0.92);
+  }
+
+  .mock-query {
+    flex: 1;
+    font-size: 1.06em;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .caret {
+    display: inline-block;
+    width: 1.5px;
+    height: 1.05em;
+    margin-left: 2px;
+    background: #9fb4e0;
+    vertical-align: text-bottom;
+    animation: blink 1.15s steps(2, start) infinite;
+  }
+
+  @keyframes blink {
+    to { visibility: hidden; }
+  }
+
+  .mock-cta {
+    flex: none;
+    border-radius: 0.72em;
+    background: #718abe;
+    padding: 0.62em 1.25em;
+    color: #0b1421;
+    font-size: 0.92em;
+    font-weight: 660;
+  }
+
+  /* Scope control */
+  .mock-scope {
+    display: flex;
+    gap: 0.9em;
+    align-items: center;
+    padding: 1.1em 0 1.4em;
+    font-size: 0.85em;
+  }
+
+  .mock-scope-label {
+    color: rgb(181 185 188 / 0.5);
+    font-size: 0.85em;
+    font-weight: 640;
+    letter-spacing: 0.14em;
+  }
+
+  .segments {
+    display: inline-flex;
+    overflow: hidden;
+    border: 1px solid rgb(181 185 188 / 0.16);
+    border-radius: 0.6em;
+    background: rgb(11 20 33 / 0.6);
+  }
+
+  .segments span {
+    padding: 0.42em 0.95em;
+    color: rgb(218 222 228 / 0.62);
+    white-space: nowrap;
+  }
+
+  .segments .on {
+    background: rgb(181 185 188 / 0.19);
+    color: #f4f6f8;
+    font-weight: 600;
+  }
+
+  .mock-hint { color: rgb(181 185 188 / 0.6); }
+
+  .mock-count {
+    padding-bottom: 1em;
+    color: rgb(181 185 188 / 0.6);
+    font-size: 0.9em;
+  }
+
+  .mock-count strong {
+    color: #f4f6f8;
+    font-weight: 620;
+  }
+
+  /* Result cards */
+  .mock-grid {
+    display: grid;
+    gap: 1.1em;
+    grid-template-columns: repeat(3, 1fr);
+  }
+
+  .card {
+    overflow: hidden;
+    border: 1px solid rgb(181 185 188 / 0.14);
+    border-radius: var(--card-radius);
+    background: linear-gradient(150deg, rgb(40 48 65 / 0.7), rgb(11 20 33 / 0.78));
+  }
+
+  .card-tile {
+    position: relative;
+    display: flex;
+    align-items: flex-end;
+    justify-content: space-between;
+    aspect-ratio: 16 / 10;
+    padding: 0.7em;
+    font-size: 0.82em;
+    font-weight: 620;
+  }
+
+  /* Abstract stand-ins for footage: a horizon, a light source, a vignette.
+     Enough to read as a frame of video at thumbnail size without shipping
+     anyone else's photograph. */
+  .card-tile::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(to bottom, transparent 45%, rgb(0 0 0 / 0.72));
+  }
+
+  .tile-sunset {
+    background:
+      radial-gradient(circle at 62% 74%, rgb(255 214 170 / 0.9), transparent 42%),
+      linear-gradient(to bottom, #2d3d63 0%, #7c6a83 44%, #c98a63 62%, #2b3550 66%, #101a2c 100%);
+  }
+
+  .tile-dusk {
+    background:
+      radial-gradient(circle at 30% 30%, rgb(190 205 235 / 0.5), transparent 45%),
+      linear-gradient(to bottom, #38507f 0%, #5f6d92 40%, #a98a86 58%, #1d2740 62%, #0b1221 100%);
+  }
+
+  .tile-cliffs {
+    background:
+      radial-gradient(circle at 78% 22%, rgb(200 215 235 / 0.32), transparent 44%),
+      linear-gradient(to bottom, #5d7392 0%, #3f5570 38%, #263c52 55%, #16283a 72%, #0a1420 100%);
+  }
+
+  .card-badge,
+  .card-score {
+    position: relative;
+    z-index: 1;
+    display: inline-flex;
+    gap: 0.35em;
+    align-items: center;
+    color: #fff;
+    text-shadow: 0 1px 3px rgb(0 0 0 / 0.6);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .card-meta {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5em;
+    padding: 0.85em 0.9em 1em;
+  }
+
+  .card-name {
+    margin: 0;
+    font-size: 0.92em;
+    font-weight: 620;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+  }
+
+  .card-evidence,
+  .card-where {
+    display: flex;
+    gap: 0.4em;
+    align-items: flex-start;
+    margin: 0;
+    color: rgb(181 185 188 / 0.76);
+    font-size: 0.8em;
+  }
+
+  .card-evidence svg,
+  .card-where svg {
+    flex: none;
+    margin-top: 0.22em;
+  }
+
+  .card-where {
+    color: rgb(181 185 188 / 0.5);
+    align-items: center;
+  }
+
+  .card-where svg { margin-top: 0; }
+
+  /* Narrow viewports: the third card would be unreadable, so the grid drops to
+     two and the top bar sheds its optional controls. */
+  @container (max-width: 620px) {
+    .mock-grid { grid-template-columns: repeat(2, 1fr); }
+    .card:last-child { display: none; }
+    .mock-ghost,
+    .mock-hint,
+    .mock-scope-label { display: none; }
+    .mock-wordmark small { display: none; }
+  }
+
+  @container (max-width: 420px) {
+    .mock-grid { grid-template-columns: 1fr; }
+    .card:nth-child(2) { display: none; }
+    .mock-pill { display: none; }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .caret { animation: none; }
+  }
+</style>

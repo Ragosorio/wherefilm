@@ -1,0 +1,228 @@
+---
+import Layout from '../layouts/Layout.astro';
+import AppMockup from '../components/AppMockup.astro';
+
+const downloadURL = 'https://github.com/Ragosorio/wherefilm/releases/download/v0.1.0/WhereFilm-0.1.0-macOS.dmg';
+const releaseURL = 'https://github.com/Ragosorio/wherefilm/releases/tag/v0.1.0';
+---
+
+<Layout
+  title="WhereFilm — Encuentra cualquier momento"
+  description="Encuentra escenas y frases dentro de tus fotos y videos con tus propias palabras. Todo ocurre en tu Mac."
+>
+  <header class="fixed inset-x-0 top-0 z-50 border-b border-white/8 bg-[#070b11]/72 backdrop-blur-2xl">
+    <nav class="shell flex h-[76px] items-center" aria-label="Navegación principal">
+      <a class="flex items-center gap-3 no-underline" href="#inicio" aria-label="WhereFilm, inicio">
+        <img src="/brand/wherefilm-icon.png" width="40" height="40" alt="" class="rounded-[11px] shadow-xl" />
+        <span class="text-[13px] font-semibold tracking-[0.2em]">WHEREFILM</span>
+      </a>
+
+      <div class="ml-auto hidden items-center gap-8 text-sm text-white/64 md:flex">
+        <a class="no-underline transition hover:text-white" href="#como-funciona">Cómo funciona</a>
+        <a class="no-underline transition hover:text-white" href="#privacidad">Privacidad</a>
+        <a class="no-underline transition hover:text-white" href="#instalar">Instalar</a>
+      </div>
+
+      <a class="button-secondary ml-5 !min-h-[42px] !px-5" href={downloadURL} aria-label="Descargar WhereFilm para Mac">
+        Descargar
+        <span aria-hidden="true">↓</span>
+      </a>
+    </nav>
+  </header>
+
+  <main id="contenido">
+    <section id="inicio" class="shell flex min-h-[940px] flex-col items-center justify-center pb-24 pt-40 text-center">
+      <div class="reveal">
+        <p class="eyebrow">Búsqueda natural para tu archivo</p>
+        <h1 class="display silver-text">Tus mejores momentos no deberían estar perdidos.</h1>
+        <p class="lede">
+          Describe lo que recuerdas —una escena, un lugar o una frase— y WhereFilm encuentra el momento exacto entre tus fotos y videos.
+        </p>
+        <div class="mt-9 flex flex-col justify-center gap-3 sm:flex-row">
+          <a class="button-primary" href={downloadURL}>
+            <svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
+              <path d="M18.71 12.35c.03-2.92 2.39-4.32 2.5-4.39a5.08 5.08 0 0 0-4-2.16c-1.68-.18-3.31 1.01-4.17 1.01-.88 0-2.2-.99-3.63-.96a5.3 5.3 0 0 0-4.46 2.72c-1.93 3.34-.49 8.25 1.36 10.96.93 1.33 2.01 2.81 3.44 2.75 1.4-.06 1.93-.88 3.63-.88 1.68 0 2.18.88 3.64.85 1.5-.03 2.45-1.33 3.34-2.67a10.96 10.96 0 0 0 1.53-3.12 4.83 4.83 0 0 1-3.18-4.11ZM16.12 4.02A4.9 4.9 0 0 0 17.24.5a5.03 5.03 0 0 0-3.25 1.67 4.66 4.66 0 0 0-1.15 3.39 4.17 4.17 0 0 0 3.28-1.54Z" />
+            </svg>
+            Descargar para Mac
+          </a>
+          <a class="button-secondary" href="#como-funciona">Ver cómo funciona</a>
+        </div>
+        <p class="mt-4 text-xs tracking-wide text-white/42">Apple Silicon · macOS 26 · Vista previa gratuita</p>
+      </div>
+
+      <div class="reveal-late relative mt-20 w-full">
+        <div class="absolute inset-x-[12%] top-0 h-36 rounded-full bg-[#718abe]/25 blur-[90px]"></div>
+        <figure id="vista" class="relative m-0 scroll-mt-28">
+          <AppMockup />
+        </figure>
+      </div>
+    </section>
+
+    <section id="como-funciona" class="hairline py-32 sm:py-44">
+      <div class="shell">
+        <p class="eyebrow">Una frase es suficiente</p>
+        <h2 class="section-title silver-text">Busca como lo recuerdas, no como guardaste el archivo.</h2>
+        <p class="section-copy">
+          No necesitas etiquetas perfectas, nombres de carpetas ni fechas exactas. WhereFilm entiende escenas y palabras dentro de tus videos para devolverte momentos, no listas interminables.
+        </p>
+
+        <div class="mt-20 grid gap-4 lg:grid-cols-3">
+          <article class="glass rounded-[26px] p-7 sm:p-9">
+            <span class="mb-16 block text-sm text-[#b8c7e6]">01</span>
+            <h3 class="text-2xl font-medium tracking-[-0.03em]">Elige tu archivo</h3>
+            <p class="mt-4 leading-7 text-white/58">Añade una carpeta o un disco. Tus originales se quedan exactamente donde están.</p>
+          </article>
+          <article class="glass rounded-[26px] p-7 sm:p-9">
+            <span class="mb-16 block text-sm text-[#b8c7e6]">02</span>
+            <h3 class="text-2xl font-medium tracking-[-0.03em]">Describe el recuerdo</h3>
+            <p class="mt-4 leading-7 text-white/58">“Atardecer frente al mar” o “donde hablaron del presupuesto”. Así de natural.</p>
+          </article>
+          <article class="glass rounded-[26px] p-7 sm:p-9">
+            <span class="mb-16 block text-sm text-[#b8c7e6]">03</span>
+            <h3 class="text-2xl font-medium tracking-[-0.03em]">Abre justo ahí</h3>
+            <p class="mt-4 leading-7 text-white/58">Cada resultado te lleva al segundo exacto del video o a la foto que buscabas.</p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section id="privacidad" class="hairline overflow-hidden py-32 sm:py-44">
+      <div class="shell grid items-center gap-16 lg:grid-cols-[0.9fr_1.1fr]">
+        <div>
+          <p class="eyebrow">Privado por diseño</p>
+          <h2 class="section-title silver-text">Tu archivo nunca sale de tu Mac.</h2>
+          <p class="section-copy">
+            WhereFilm analiza, recuerda y busca de forma local. No crea una copia en la nube y no necesita conocer tu cuenta, tu contenido ni tus búsquedas.
+          </p>
+          <div class="mt-10 flex flex-wrap gap-3 text-sm text-white/64">
+            <span class="rounded-full border border-white/10 bg-white/[0.035] px-4 py-2">Sin nube</span>
+            <span class="rounded-full border border-white/10 bg-white/[0.035] px-4 py-2">Sin cuenta</span>
+            <span class="rounded-full border border-white/10 bg-white/[0.035] px-4 py-2">Sin duplicar originales</span>
+          </div>
+        </div>
+
+        <div class="glass relative min-h-[480px] overflow-hidden rounded-[32px] p-8 sm:p-12">
+          <div class="absolute -right-24 -top-24 h-80 w-80 rounded-full bg-[#718abe]/24 blur-[80px]"></div>
+          <div class="relative flex h-full min-h-[380px] flex-col justify-between">
+            <div class="flex h-16 w-16 items-center justify-center rounded-2xl border border-white/12 bg-[#0b1421]/80 shadow-2xl">
+              <svg aria-hidden="true" width="29" height="29" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                <rect x="5" y="10" width="14" height="10" rx="3"></rect>
+                <path d="M8 10V7a4 4 0 0 1 8 0v3"></path>
+              </svg>
+            </div>
+            <div>
+              <p class="text-xs font-semibold tracking-[0.17em] text-white/44">UN ESPACIO SOLO TUYO</p>
+              <p class="mt-5 max-w-lg text-3xl font-medium leading-[1.15] tracking-[-0.04em] sm:text-5xl">
+                La inteligencia vive junto a tus recuerdos, no del otro lado de internet.
+              </p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="hairline py-32 sm:py-44">
+      <div class="shell">
+        <div class="mx-auto max-w-4xl text-center">
+          <p class="eyebrow">Tu archivo permanece visible</p>
+          <h2 class="section-title silver-text mx-auto">Incluso cuando el disco está guardado.</h2>
+          <p class="lede !mt-7">
+            WhereFilm conserva vistas previas y lo aprendido. Puedes buscar primero y conectar el disco correcto solo cuando quieras abrir el original.
+          </p>
+        </div>
+
+        <div class="glass mx-auto mt-20 max-w-4xl overflow-hidden rounded-[30px] p-5 sm:p-9">
+          <div class="grid gap-4 sm:grid-cols-3">
+            <div class="aspect-[4/5] rounded-2xl bg-gradient-to-br from-[#44516a] via-[#152335] to-[#080b10] p-4">
+              <span class="rounded-full bg-black/45 px-3 py-1 text-xs">Disponible</span>
+            </div>
+            <div class="aspect-[4/5] rounded-2xl bg-gradient-to-br from-[#283041] via-[#171d29] to-[#070a0f] p-4 opacity-90">
+              <span class="rounded-full bg-black/45 px-3 py-1 text-xs">Disco guardado</span>
+            </div>
+            <div class="aspect-[4/5] rounded-2xl bg-gradient-to-br from-[#77849a] via-[#34394a] to-[#101621] p-4">
+              <span class="rounded-full bg-black/45 px-3 py-1 text-xs">Disponible</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="instalar" class="hairline py-32 sm:py-44">
+      <div class="shell grid gap-14 lg:grid-cols-[1fr_0.85fr] lg:items-center">
+        <div>
+          <p class="eyebrow">Lista para tu Mac</p>
+          <h2 class="section-title silver-text">Descarga. Arrastra. Empieza a encontrar.</h2>
+          <p class="section-copy">
+            La aplicación completa viene dentro de una imagen de disco, como cualquier app de Mac. No necesita Terminal ni descargas adicionales.
+          </p>
+          <div class="mt-9 flex flex-col gap-3 sm:flex-row">
+            <a class="button-primary" href={downloadURL}>Descargar WhereFilm</a>
+            <a class="button-secondary" href={releaseURL}>Ver esta versión</a>
+          </div>
+        </div>
+
+        <aside class="glass rounded-[28px] p-7 sm:p-9" aria-labelledby="primera-apertura">
+          <p id="primera-apertura" class="text-sm font-semibold tracking-[0.14em] text-white/54">PRIMERA APERTURA</p>
+          <ol class="mt-8 space-y-6">
+            <li class="grid grid-cols-[34px_1fr] gap-3">
+              <span class="flex h-8 w-8 items-center justify-center rounded-full border border-white/14 text-sm">1</span>
+              <div>
+                <strong class="font-medium">Arrastra WhereFilm a Aplicaciones.</strong>
+                <p class="mt-1 text-sm leading-6 text-white/50">Todo lo necesario viaja dentro de la app. No hay una segunda descarga.</p>
+              </div>
+            </li>
+            <li class="grid grid-cols-[34px_1fr] gap-3">
+              <span class="flex h-8 w-8 items-center justify-center rounded-full border border-white/14 text-sm">2</span>
+              <div>
+                <strong class="font-medium">Ábrela una vez y pulsa “Aceptar”.</strong>
+                <p class="mt-1 text-sm leading-6 text-white/50">
+                  Tu Mac dirá que no puede comprobar quién la hizo. Es lo que dice de cualquier app que no paga la licencia de distribución de Apple.
+                </p>
+              </div>
+            </li>
+            <li class="grid grid-cols-[34px_1fr] gap-3">
+              <span class="flex h-8 w-8 items-center justify-center rounded-full border border-white/14 text-sm">3</span>
+              <div>
+                <strong class="font-medium">Pulsa “Abrir de todas formas”.</strong>
+                <p class="mt-1 text-sm leading-6 text-white/50">
+                  Está en Privacidad y seguridad, abajo del aviso. Solo esta vez: tu Mac lo recuerda para siempre.
+                </p>
+                <!-- Opens the exact pane instead of leaving someone to hunt for
+                     it. Only works when the page is opened on the Mac itself,
+                     so it is an aid, not the instruction. -->
+                <a
+                  class="mt-3 inline-flex items-center gap-2 rounded-full border border-white/16 bg-white/[0.045] px-4 py-2 text-sm no-underline transition hover:border-white/32 hover:bg-white/[0.08]"
+                  href="x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension"
+                >
+                  Abrir Privacidad y seguridad
+                  <span aria-hidden="true">↗</span>
+                </a>
+              </div>
+            </li>
+          </ol>
+        </aside>
+      </div>
+    </section>
+
+    <section class="hairline py-32 text-center sm:py-44">
+      <div class="shell">
+        <img src="/brand/wherefilm-icon.png" width="92" height="92" alt="" class="mx-auto rounded-[23px] shadow-2xl" />
+        <h2 class="mx-auto mt-9 max-w-4xl text-[clamp(2.8rem,6vw,6.2rem)] font-medium leading-[0.94] tracking-[-0.06em] silver-text">
+          Vuelve a encontrar lo que ya creaste.
+        </h2>
+        <a class="button-primary mt-10" href={downloadURL}>Descargar para Mac</a>
+      </div>
+    </section>
+  </main>
+
+  <footer class="hairline py-10 text-sm text-white/42">
+    <div class="shell flex flex-col gap-5 sm:flex-row sm:items-center">
+      <p>© 2026 WhereFilm. Tus recuerdos siguen siendo tuyos.</p>
+      <div class="sm:ml-auto flex flex-wrap gap-x-6 gap-y-2">
+        <a class="hover:text-white" href="https://github.com/Ragosorio/wherefilm">GitHub</a>
+        <a class="hover:text-white" href="https://support.apple.com/es-mx/102445">Ayuda para abrirla</a>
+        <a class="hover:text-white" href="https://github.com/Ragosorio/wherefilm/blob/main/ThirdPartyLicenses/APPLE-MOBILECLIP-LICENSE.txt">Licencias</a>
+      </div>
+    </div>
+  </footer>
+</Layout>

@@ -46,16 +46,59 @@ struct QueryPlanningTests {
 
     @Test("Filler words are dropped")
     func fillerIsDropped() {
-        let terms = QueryPlanner.literalTerms(from: "el video donde se ve la playa")
-        #expect(terms.contains("playa"))
+        let terms = QueryPlanner.literalTerms(from: "el video donde se ve la carretera entre árboles")
+        #expect(terms.contains("carretera"))
         #expect(!terms.contains("el"))
         #expect(!terms.contains("video"))
+        #expect(!terms.contains("entre"))
     }
 
     @Test("An English query is left alone")
     func englishPassesThrough() {
         let plan = planner.lexiconPlan("man wearing a blue shirt")
         #expect(plan.visualPhrases.contains("man wearing a blue shirt"))
+    }
+
+    /// A person searching their own footage types plurals. Hand-listing them in
+    /// the table would double it and still leave gaps.
+    @Test("Plurals are translated, not just dictionary singulars")
+    func pluralsAreTranslated() {
+        #expect(Lexicon.translateVisual("acantilados").contains("cliff"))
+        #expect(Lexicon.translateVisual("unos árboles").contains("tree"))
+        #expect(Lexicon.translateVisual("las montañas").contains("mountain"))
+        #expect(Lexicon.translateVisual("unas mujeres").contains("women") ||
+                Lexicon.translateVisual("unas mujeres").contains("woman"))
+        #expect(Lexicon.translateVisual("dos carros").contains("car"))
+        // Already-plural and invariant entries must not be mangled.
+        #expect(Lexicon.translateVisual("olas").contains("waves"))
+        #expect(Lexicon.translateVisual("lentes").contains("glasses"))
+    }
+
+    /// The on-device model is non-deterministic about the language it answers
+    /// in. Spanish reaching an English-only text encoder ruins the search
+    /// silently, so the guard has to be deterministic.
+    @Test("Untranslated Spanish is caught before it reaches the encoder")
+    func spanishIsDetectedAfterTheModel() {
+        #expect(Lexicon.needsTranslation("acantilados junto al mar"))
+        #expect(Lexicon.needsTranslation("el chavo de playera azul"))
+        // English must pass through untouched, including English with a proper
+        // noun or loanword in it.
+        #expect(!Lexicon.needsTranslation("cliffs beside the sea"))
+        #expect(!Lexicon.needsTranslation("a wide establishing shot of a city"))
+        #expect(!Lexicon.needsTranslation("a plaza in the old town at sunset"))
+    }
+
+    /// Observed from the real model: a field asked to be empty came back as the
+    /// literal string "no spoken", which then became a transcript search term.
+    @Test("A model that says \"no spoken\" is not searched for those words")
+    func emptySentinelsAreRejected() {
+        #expect(QueryPlanner.isEmptySentinel("no spoken"))
+        #expect(QueryPlanner.isEmptySentinel("None."))
+        #expect(QueryPlanner.isEmptySentinel(" ninguno "))
+        #expect(QueryPlanner.isEmptySentinel(""))
+        // Real terms must survive.
+        #expect(!QueryPlanner.isEmptySentinel("presupuesto"))
+        #expect(!QueryPlanner.isEmptySentinel("nada más que decir"))
     }
 }
 

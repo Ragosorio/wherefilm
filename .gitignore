@@ -20,6 +20,15 @@ clip-merges.txt
 *.usearch
 *.usearch.meta
 
+# Landing page: dependencies and build output are reproducible from
+# site/package-lock.json, and Vercel builds them itself.
+node_modules/
+site/dist/
+site/.astro/
+site/.vercel/
+.vercel/
+*.tsbuildinfo
+
 # Local agent tooling, not part of the project
 .agents/
 .claude/

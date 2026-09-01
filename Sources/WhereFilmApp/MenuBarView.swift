@@ -3,158 +3,179 @@ import AppKit
 import WhereFilmCore
 import WhereFilmIndex
 
-/// The menu bar panel.
-///
-/// The switch here is not decoration: it drives a real resource governor. When
-/// the timeline needs every cycle, "Pause · 2h" genuinely stops the work and it
-/// comes back on its own.
-///
-/// Worth saying plainly, because the wording matters to people: pausing the
-/// indexer does not stop any listening. Indexing reads audio *tracks out of
-/// files*. The microphone is never involved, and the app never asks for it.
+/// Compact control center. Indexing reads audio tracks from selected files; the
+/// microphone is never involved and is not requested by the app.
 struct MenuBarView: View {
     @Environment(AppModel.self) private var model
-    @Environment(\.openWindow) private var openWindow
 
     private let pauseDurations: [(String, TimeInterval?)] = [
-        ("15m", 15 * 60), ("30m", 30 * 60), ("1h", 3600),
-        ("2h", 2 * 3600), ("4h", 4 * 3600), ("∞", nil),
+        ("15 min", 15 * 60), ("1 h", 3600), ("4 h", 4 * 3600), ("Sin límite", nil),
     ]
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 14) {
             header
 
-            if let error = model.startupError {
-                Label(error, systemImage: "exclamationmark.triangle")
+            if let error = model.startupError ?? model.libraryError {
+                Label(error, systemImage: "exclamationmark.triangle.fill")
                     .foregroundStyle(.orange)
-                    .font(.callout)
+                    .font(.caption)
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
-            Divider()
-            indexerSection
-            Divider()
+            statusCard
             pauseSection
-            Divider()
-            statsSection
-            Divider()
             actions
         }
-        .padding(14)
-        .frame(width: 300)
+        .padding(16)
+        .frame(width: 330)
+        .preferredColorScheme(.dark)
+        .background(WhereFilmBrand.inkWell)
     }
 
     private var header: some View {
-        HStack {
-            Text("WhereFilm").font(.headline)
-            Spacer()
-            Text(model.pauseRemaining ?? model.throttleReason.label)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-        }
-    }
-
-    private var indexerSection: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text("INDEXER").font(.caption2).foregroundStyle(.secondary)
-
-            Picker("", selection: Binding(
-                get: { model.mode },
-                set: { model.mode = $0; if $0 != .paused { model.pausedUntil = nil } })) {
-                ForEach(IndexerMode.allCases, id: \.self) { mode in
-                    Text(mode.label).tag(mode)
-                }
-            }
-            .pickerStyle(.radioGroup)
-            .labelsHidden()
-
-            if let activity = model.currentActivity {
-                Text(activity)
+        HStack(spacing: 10) {
+            Image(nsImage: NSApp.applicationIconImage)
+                .resizable()
+                .frame(width: 34, height: 34)
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            VStack(alignment: .leading, spacing: 1) {
+                Text("WHEREFILM")
+                    .font(.system(size: 12, weight: .semibold, design: .rounded))
+                    .tracking(1.8)
+                Text(statusLabel)
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
             }
+            Spacer()
+            Circle()
+                .fill(statusColor)
+                .frame(width: 8, height: 8)
+                .shadow(color: statusColor.opacity(0.8), radius: 5)
         }
     }
 
-    private var pauseSection: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text("PAUSE FOR").font(.caption2).foregroundStyle(.secondary)
-            HStack(spacing: 4) {
-                ForEach(pauseDurations, id: \.0) { label, duration in
-                    Button(label) { model.pause(for: duration) }
-                        .buttonStyle(.bordered)
-                        .controlSize(.small)
+    private var statusCard: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                stat(model.stats.assets, "archivos", icon: "photo.stack")
+                Divider().frame(height: 34)
+                stat(model.stats.moments, "momentos", icon: "sparkles.rectangle.stack")
+            }
+
+            if model.stats.pendingJobs > 0 {
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text("\(model.stats.pendingJobs.formatted()) archivos por organizar")
+                        .font(.caption)
                 }
             }
-            if model.pauseRemaining != nil {
-                Button("Resume now") { model.resume() }
-                    .buttonStyle(.link)
-                    .controlSize(.small)
-            }
-        }
-    }
 
-    private var statsSection: some View {
-        VStack(alignment: .leading, spacing: 3) {
-            row("\(model.stats.assets.formatted()) assets indexed")
-            row("\(model.stats.moments.formatted()) searchable moments")
             if model.stats.volumesOffline > 0 {
-                row("\(model.stats.volumesOffline) drive\(model.stats.volumesOffline == 1 ? "" : "s") offline")
+                Label("\(model.stats.volumesOffline) disco(s) desconectado(s) · índice disponible", systemImage: "externaldrive.badge.xmark")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
-            if model.stats.pendingJobs > 0 {
-                row("\(model.stats.pendingJobs.formatted()) files pending")
-            }
-            if model.stats.missingLocations > 0 {
-                // Deliberately worded so it never reads as data loss.
-                row("\(model.stats.missingLocations) originals missing — index kept")
-            }
+
             if !model.modelInstalled {
-                Text("Visual model not installed — run Scripts/fetch-models.sh")
+                Label("El modelo visual no está disponible", systemImage: "exclamationmark.triangle")
                     .font(.caption)
                     .foregroundStyle(.orange)
             }
         }
+        .padding(13)
+        .whereFilmGlass(cornerRadius: 16)
     }
 
-    private func row(_ text: String) -> some View {
-        Text(text).font(.callout).foregroundStyle(.secondary)
+    private func stat(_ value: Int, _ label: String, icon: String) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: icon).foregroundStyle(WhereFilmBrand.silver)
+            VStack(alignment: .leading, spacing: 0) {
+                Text(value.formatted()).font(.headline).monospacedDigit()
+                Text(label).font(.caption2).foregroundStyle(.secondary)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    private var actions: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Button {
-                NSApp.activate(ignoringOtherApps: true)
-                openWindow(id: SearchWindowID)
-            } label: {
-                HStack {
-                    Text("Open Search…")
-                    Spacer()
-                    Text("⌘⇧Space").foregroundStyle(.tertiary)
+    private var pauseSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("TRABAJO EN SEGUNDO PLANO")
+                    .font(.caption2.weight(.semibold))
+                    .tracking(1.2)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                if model.mode == .paused || model.pauseRemaining != nil {
+                    Button("Reanudar") { model.resume() }.buttonStyle(.link)
                 }
             }
-            .buttonStyle(.plain)
 
-            Button("Add Folder or Drive…") { addLibrary() }
-                .buttonStyle(.plain)
-
-            Divider()
-
-            Button("Quit WhereFilm") { NSApp.terminate(nil) }
-                .buttonStyle(.plain)
+            if model.mode == .paused || model.pauseRemaining != nil {
+                Text(model.pauseRemaining.map { "Pausado por \($0)" } ?? "Pausado hasta que lo reanudes")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                HStack(spacing: 6) {
+                    ForEach(pauseDurations, id: \.0) { label, duration in
+                        Button(label) { model.pause(for: duration) }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                    }
+                }
+            }
         }
     }
 
-    private func addLibrary() {
-        let panel = NSOpenPanel()
-        panel.canChooseDirectories = true
-        panel.canChooseFiles = false
-        panel.allowsMultipleSelection = false
-        panel.prompt = "Add"
-        panel.message = "Choose a folder or drive to index. Your originals are never moved or copied."
-        NSApp.activate(ignoringOtherApps: true)
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-        model.addLibrary(url)
+    private var actions: some View {
+        VStack(spacing: 0) {
+            Divider().padding(.bottom, 8)
+
+            action("Abrir búsqueda", symbol: "sparkle.magnifyingglass", shortcut: "⌘⇧Espacio") {
+                SearchWindowController.shared.show()
+            }
+            action("Añadir carpeta o disco…", symbol: "plus.rectangle.on.folder", shortcut: nil) {
+                model.chooseLibrary()
+            }
+
+            Divider().padding(.vertical, 8)
+
+            Button("Salir de WhereFilm") { NSApp.terminate(nil) }
+                .buttonStyle(.plain)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private func action(_ title: String, symbol: String, shortcut: String?, perform: @escaping () -> Void) -> some View {
+        Button(action: perform) {
+            HStack(spacing: 9) {
+                Image(systemName: symbol).frame(width: 18)
+                Text(title)
+                Spacer()
+                if let shortcut { Text(shortcut).foregroundStyle(.tertiary) }
+            }
+            .padding(.vertical, 6)
+        }
+        .buttonStyle(.plain)
+    }
+
+    private var statusLabel: String {
+        if let remaining = model.pauseRemaining { return "Pausado · \(remaining)" }
+        if model.mode == .paused { return "Pausado por ti" }
+        if model.currentActivity != nil { return "Organizando tu archivo" }
+        return switch model.throttleReason {
+        case .none: "Listo para buscar"
+        case .userPaused: "Pausado por ti"
+        case .thermal: "Esperando a que la Mac se enfríe"
+        case .lowPower: "Pausado por ahorro de energía"
+        case .onBattery: "Modo ligero · usando batería"
+        case .editorInForeground: "Esperando mientras editas"
+        }
+    }
+
+    private var statusColor: Color {
+        model.mode == .paused || model.pauseRemaining != nil ? .orange : WhereFilmBrand.blue
     }
 }

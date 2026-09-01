@@ -87,10 +87,10 @@ public struct QueryPlanner: Sendable {
 
     @Generable
     struct ModelPlan {
-        @Guide(description: "A short English phrase describing what is VISIBLE in the shot: people, clothing, colours, place, time of day. Empty if the query says nothing about appearance.")
+        @Guide(description: "A short English phrase containing ONLY what is visibly observable in the shot: people, clothing, colours, place, time of day. Exclude topics or words that are merely spoken, such as a budget mentioned in dialogue. Empty if the query says nothing about appearance.")
         var visual: String
 
-        @Guide(description: "An alternative English phrasing of the same visible scene, using different words. Empty if there is no visual part.")
+        @Guide(description: "An alternative English phrasing of the same strictly visible scene, using different words. Never include dialogue topics. Empty if there is no visual part.")
         var visualAlternative: String
 
         @Guide(description: "Words the speaker would have SAID, written in the SAME LANGUAGE as the query — if the query is Spanish these MUST be Spanish. Comma separated, with close synonyms. Never translate these. Empty if the query says nothing about speech.")
@@ -105,8 +105,10 @@ public struct QueryPlanner: Sendable {
             You split media search queries into separate signals for a video search engine.
             The engine matches pictures with an English image-text model, and matches speech \
             against transcripts that are in the language actually spoken.
-            So: describe the VISIBLE part in English, and keep the SPOKEN part in the \
-            query's own language. Never invent details that are not implied by the query.
+            So: describe only directly observable VISIBLE details in English, and keep the \
+            SPOKEN part in the query's own language. A spoken topic is never a visible \
+            detail: for "persona con camisa azul que habló del presupuesto", visual is \
+            "person wearing a blue shirt" and spoken is "presupuesto". Never invent details.
             """)
 
         let response = try await session.respond(to: query, generating: ModelPlan.self)
@@ -114,7 +116,16 @@ public struct QueryPlanner: Sendable {
 
         var visualPhrases = [plan.visual, plan.visualAlternative]
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
+            .filter { !Self.isEmptySentinel($0) }
+            // The model is asked for English and is non-deterministic about it.
+            // An untranslated phrase reaching the English-only text encoder is
+            // the single worst failure this planner can produce, so every phrase
+            // goes past the lexicon on its way out.
+            .map { phrase in
+                guard Lexicon.needsTranslation(phrase) else { return phrase }
+                let translated = Lexicon.translateVisual(phrase)
+                return translated.isEmpty ? phrase : translated
+            }
         // Deduplicate without reordering: the first phrase is the model's best.
         var seen = Set<String>()
         visualPhrases = visualPhrases.filter { seen.insert($0.lowercased()).inserted }
@@ -128,7 +139,7 @@ public struct QueryPlanner: Sendable {
         var spokenTerms = literalTerms
         for term in plan.spoken.split(separator: ",") {
             let cleaned = term.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard cleaned.count > 2,
+            guard cleaned.count > 2, !Self.isEmptySentinel(cleaned),
                   !spokenTerms.contains(where: { $0.caseInsensitiveCompare(cleaned) == .orderedSame })
             else { continue }
             spokenTerms.append(cleaned)
@@ -173,6 +184,26 @@ public struct QueryPlanner: Sendable {
             mediaType: nil,
             dateRange: nil,
             source: isSpanish ? .lexicon : .literal)
+    }
+
+    /// A structured-output field asked to be "empty" is not always empty.
+    ///
+    /// Observed from the on-device model: it answers the field named `spoken`
+    /// with the literal text "no spoken". Left alone that becomes a transcript
+    /// search term and quietly poisons the text half of every such query.
+    static func isEmptySentinel(_ text: String) -> Bool {
+        let folded = text
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+            .trimmingCharacters(in: CharacterSet(charactersIn: ".\"'"))
+        if folded.isEmpty { return true }
+        let sentinels: Set<String> = [
+            "none", "n/a", "na", "null", "nil", "empty", "no visual", "no spoken",
+            "no dialogue", "no speech", "no text", "not applicable", "nothing",
+            "ninguno", "ninguna", "nada", "vacio", "vacío", "sin dialogo",
+            "sin diálogo", "no aplica",
+        ]
+        return sentinels.contains(folded)
     }
 
     static func literalTerms(from query: String) -> [String] {

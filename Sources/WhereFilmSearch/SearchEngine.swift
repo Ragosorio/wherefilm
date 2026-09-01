@@ -127,6 +127,14 @@ public struct SearchEngine: Sendable {
         public var variant: MobileCLIPVariant = .s0
         /// Collapse near-identical frames from the same asset.
         public var suppressNearDuplicates = true
+        /// Drop results whose final confidence is below this, on the same 0–1
+        /// scale the interface shows as a percentage.
+        ///
+        /// The similarity floor above decides what may *enter* the ranking; this
+        /// decides what is worth *showing*. They are different questions. A
+        /// result the engine itself rates at 2% is not an answer, and printing it
+        /// next to a genuine 27% match teaches someone to distrust both numbers.
+        public var minimumConfidence: Double = 0
 
         public init() {}
     }
@@ -403,26 +411,31 @@ public struct SearchEngine: Sendable {
         }
         top = Array(top.prefix(options.limit))
 
-        let assetIDs = Array(Set(top.map(\.candidate.assetID)))
-        let assets = try store.assets(ids: assetIDs)
-        let locationsByAsset = try store.locations(assetIDs: assetIDs)
-
         // Deliberately *not* rescaled so the best hit reads 100%. A weak match
         // should look weak, even when it is the best thing in the library.
         let ceiling = options.weights.visual + options.weights.transcript
             + options.weights.onScreenText + options.weights.metadata
 
-        return try top.compactMap { entry -> SearchResult? in
+        // Applied against the number a person will actually read, after the same
+        // division the result carries — otherwise the threshold would mean
+        // something different from what the interface displays.
+        if options.minimumConfidence > 0 {
+            top = top.filter { min(1, $0.score / ceiling) >= options.minimumConfidence }
+        }
+
+        let assetIDs = Array(Set(top.map(\.candidate.assetID)))
+        let assets = try store.assets(ids: assetIDs)
+        let locationsByAsset = try store.locations(assetIDs: assetIDs)
+
+        return top.compactMap { entry -> SearchResult? in
             guard let asset = assets[entry.candidate.assetID] else { return nil }
 
-            var evidence = entry.candidate.evidence
-            // A visual-only hit is much easier to judge with the line that was
-            // being spoken at that instant.
-            if !evidence.contains(where: { if case .transcript = $0 { true } else { false } }),
-               let nearby = try store.transcriptNear(assetID: entry.candidate.assetID,
-                                                     seconds: entry.candidate.start) {
-                evidence.append(.transcript(text: nearby.text, seconds: nearby.startSeconds))
-            }
+            // Evidence means "this signal matched the query". Nearby dialogue
+            // can be useful context, but presenting it here as evidence made a
+            // visual-only hit look like a multimodal agreement. Keep this list
+            // truthful; transcript evidence is added only by the transcript
+            // search channel.
+            let evidence = entry.candidate.evidence
 
             let locations = (locationsByAsset[entry.candidate.assetID] ?? []).map { location in
                 ResolvedLocation(

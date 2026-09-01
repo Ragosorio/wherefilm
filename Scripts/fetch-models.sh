@@ -2,9 +2,9 @@
 #
 # Downloads the on-device models WhereFilm needs and compiles them for Core ML.
 #
-# Nothing here is bundled with the app: the weights are a few hundred megabytes,
-# they are licensed by Apple under ASCL, and keeping them out of the repository
-# keeps the checkout small and the licensing clean.
+# The weights stay out of Git. Release builds copy the smallest S0 pair into the
+# app bundle together with Apple's required research-model license, so the DMG
+# works without Terminal or a second download.
 #
 #   ./Scripts/fetch-models.sh          # MobileCLIP-S0 (default, smallest)
 #   ./Scripts/fetch-models.sh s2       # better recall, ~2.4x the image cost

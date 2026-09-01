@@ -92,15 +92,82 @@ public enum Lexicon {
     ]
 
     /// Stop words that add nothing to a CLIP prompt.
+    ///
+    /// Anything left here reaches the text encoder as noise, so the list covers
+    /// the connectives and auxiliaries that actually show up when someone
+    /// describes a shot out loud — not a textbook stop-word list.
     static let filler: Set<String> = [
+        // Articles, pronouns, basic prepositions
         "el", "la", "los", "las", "un", "una", "unos", "unas", "de", "del", "que",
-        "donde", "cuando", "con", "y", "o", "en", "a", "al", "se", "su", "sus",
-        "es", "era", "esta", "este", "esa", "ese", "lo", "por", "para", "muy",
-        "aparece", "sale", "salía", "video", "clip", "toma", "busca", "buscar",
-        "encuentra", "encontrar", "acuerdas", "acuerdo", "recuerdas",
+        "donde", "cuando", "con", "y", "e", "o", "u", "en", "entre", "a", "al",
+        "se", "su", "sus", "mi", "mis", "tu", "tus", "lo", "por", "para", "muy",
+        "es", "era", "esta", "este", "esa", "ese", "esto", "eso", "estos", "esas",
+        // Connectives that survive translation as literal noise
+        "junto", "juntos", "junta", "sobre", "bajo", "hacia", "desde", "hasta",
+        "sin", "tras", "ante", "contra", "durante", "mientras", "pero", "aunque",
+        "tambien", "también", "solo", "sólo", "mas", "más", "menos", "algo",
+        "todo", "toda", "todos", "todas", "cual", "cuales", "quien", "quienes",
+        "como", "cómo", "hay", "son", "fue", "fueron", "estan", "están", "tiene",
+        // Search-box verbs: instructions to the app, never part of the scene
+        "aparece", "aparecen", "sale", "salen", "salía", "video", "vídeo", "clip",
+        "toma", "busca", "buscar", "buscame", "búscame", "encuentra", "encontrar",
+        "acuerdas", "acuerdo", "recuerdas", "recuerdo", "necesito", "quiero",
+        "muestrame", "muéstrame", "dame", "foto", "fotos", "imagen", "imagenes",
+        "imágenes", "archivo", "archivos", "momento", "momentos", "parte",
     ]
 
-    private static let sorted = spanishToEnglish.sorted { $0.es.count > $1.es.count }
+    /// The table above plus every plural that Spanish morphology produces from
+    /// it, longest first so multi-word phrases still win over their parts.
+    ///
+    /// Hand-listing plurals would double the table and guarantee gaps; a real
+    /// person types "acantilados" and "árboles" far more often than the
+    /// dictionary singular.
+    static let sorted: [(es: String, en: String)] = {
+        var table = spanishToEnglish
+        var known = Set(spanishToEnglish.map { fold($0.es) })
+        for entry in spanishToEnglish {
+            for plural in spanishPlurals(of: entry.es) where known.insert(fold(plural)).inserted {
+                table.append((es: plural, en: englishPlural(of: entry.en)))
+            }
+        }
+        return table.sorted { $0.es.count > $1.es.count }
+    }()
+
+    /// Spanish pluralisation, covering the three rules that matter:
+    /// vowel + *s*, consonant + *es*, and final *z* → *ces*.
+    static func spanishPlurals(of singular: String) -> [String] {
+        // Multi-word phrases ("plano cerrado") are camera language, not nouns
+        // people pluralise in a search box.
+        guard !singular.contains(" "), let last = singular.last else { return [] }
+        switch last {
+        case "a", "e", "i", "o", "u", "á", "é", "í", "ó", "ú":
+            return [singular + "s"]
+        case "z":
+            return [singular.dropLast() + "ces"]
+        case "s":
+            return []  // already plural, or invariant ("lentes", "gafas")
+        default:
+            // "mujer" → "mujeres", and the unaccented form too, because a
+            // search box rarely carries accents: "arbol" → "arboles".
+            return [singular + "es"]
+        }
+    }
+
+    /// English pluralisation, only as good as a CLIP prompt needs. The image
+    /// model is unbothered by number, so a wrong guess costs recall, not
+    /// correctness — but "cliffs" reads more like the shot than "cliff".
+    static func englishPlural(of phrase: String) -> String {
+        // Only the head noun of a short phrase; anything longer is left alone
+        // rather than mangled ("close-up shot" stays as it is).
+        guard !phrase.contains(" "), let last = phrase.last else { return phrase }
+        if phrase.hasSuffix("s") || phrase.hasSuffix("ch") || phrase.hasSuffix("sh") {
+            return phrase + "es"
+        }
+        if last == "y", let previous = phrase.dropLast().last, !"aeiou".contains(previous) {
+            return phrase.dropLast() + "ies"
+        }
+        return phrase + "s"
+    }
 
     /// Word-for-word translation of the visual part of a query. Crude, and
     /// deliberately so — CLIP responds to a bag of concrete nouns and adjectives,
@@ -124,6 +191,23 @@ public enum Lexicon {
         let words = Set(fold(text).split(separator: " ").map(String.init))
         if !words.isDisjoint(with: filler) { return true }
         return sorted.contains { words.contains(fold($0.es)) }
+    }
+
+    /// Is this phrase still Spanish *after* something claimed to translate it?
+    ///
+    /// The on-device model is asked for English and usually delivers, but it is
+    /// non-deterministic: the same query can come back translated once and
+    /// verbatim the next time. Sending Spanish to an English-only text encoder
+    /// silently wrecks a search, so the answer gets checked rather than trusted.
+    public static func needsTranslation(_ phrase: String) -> Bool {
+        let words = fold(phrase).split(separator: " ").map(String.init)
+        guard !words.isEmpty else { return false }
+        let spanishHits = words.filter { word in
+            filler.contains(word) || sorted.contains { fold($0.es) == word }
+        }
+        // One Spanish word in a long English phrase is usually a proper noun or
+        // a loanword. A third of them is a phrase that never got translated.
+        return Double(spanishHits.count) / Double(words.count) >= 0.34
     }
 
     /// Lowercase and strip accents so "camisa" and "cámara" behave predictably —

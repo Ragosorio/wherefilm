@@ -1,6 +1,8 @@
 import Foundation
 import Observation
 import SwiftUI
+import AppKit
+import ServiceManagement
 import WhereFilmCore
 import WhereFilmML
 import WhereFilmIndex
@@ -27,6 +29,8 @@ final class AppModel {
     // Library state.
     var stats = IndexStore.Stats()
     var volumes: [Volume] = []
+    var libraries: [URL] = []
+    var libraryError: String?
 
     // Search state.
     var query = ""
@@ -34,6 +38,9 @@ final class AppModel {
     var isSearching = false
     var lastPlan: SearchPlan?
     var searchError: String?
+    var precision: SearchPrecision = SearchPrecision.saved {
+        didSet { precision.save() }
+    }
 
     // Setup state.
     var modelInstalled = false
@@ -44,6 +51,7 @@ final class AppModel {
     private var indexer: Indexer?
     private var indexerTask: Task<Void, Never>?
     private var refreshTask: Task<Void, Never>?
+    private let libraryAccess = LibraryAccess()
     let variant = MobileCLIPVariant.s0
 
     var startupError: String?
@@ -75,10 +83,31 @@ final class AppModel {
                 atPath: AppPaths.models
                     .appendingPathComponent("\(variant.imageModelName).mlmodelc").path)
             foundationModelStatus = QueryPlanner.foundationModelStatus
+            libraries = libraryAccess.restore()
 
             observeIndexer(indexer)
             startIndexer()
             startRefreshLoop()
+            rescanKnownLibraries()
+
+            // Private QA hooks: let the release bundle be exercised against an
+            // isolated fixture without automating keyboard input or clicking
+            // through an open-file dialog. Inert in normal launches, because
+            // both environment variables are absent.
+            //
+            // The library hook matters more than it looks. Without it the only
+            // way to test a downloaded copy is to hand it a folder by hand,
+            // which means the path a new person actually takes — scan, index
+            // with the models inside the bundle, then search — is the one path
+            // that never gets tested.
+            let environment = ProcessInfo.processInfo.environment
+            if let path = environment["WHEREFILM_QA_LIBRARY"], !path.isEmpty {
+                addLibrary(URL(fileURLWithPath: (path as NSString).expandingTildeInPath))
+            }
+            if let demoQuery = environment["WHEREFILM_DEMO_QUERY"], !demoQuery.isEmpty {
+                query = demoQuery
+                Task { await runSearch() }
+            }
         } catch {
             startupError = error.localizedDescription
         }
@@ -176,19 +205,82 @@ final class AppModel {
         guard let pausedUntil, pausedUntil > Date() else { return nil }
         let remaining = Int(pausedUntil.timeIntervalSinceNow)
         if remaining >= 3600 {
-            return "\(remaining / 3600)h \((remaining % 3600) / 60)m left"
+            return "\(remaining / 3600) h \((remaining % 3600) / 60) min"
         }
-        return "\(max(1, remaining / 60))m left"
+        return "\(max(1, remaining / 60)) min"
     }
 
     // MARK: - Library
 
     func addLibrary(_ url: URL) {
         guard let store else { return }
+        do {
+            try libraryAccess.remember(url)
+            if !libraries.contains(where: { $0.standardizedFileURL == url.standardizedFileURL }) {
+                libraries.append(url)
+            }
+            libraryError = nil
+        } catch {
+            libraryError = "No pudimos conservar el acceso a esa carpeta: \(error.localizedDescription)"
+        }
         Task(priority: .utility) {
             let scanner = LibraryScanner(store: store)
-            _ = try? await scanner.scan(root: url)
+            do {
+                _ = try await scanner.scan(root: url)
+            } catch {
+                await MainActor.run {
+                    self.libraryError = "No pudimos revisar esa carpeta: \(error.localizedDescription)"
+                }
+            }
             await refresh()
+        }
+    }
+
+    /// Re-walks every folder the person already added, once, at launch.
+    ///
+    /// Without this the app only ever sees the files that existed the moment a
+    /// folder was first chosen — shoot something new, reopen WhereFilm, and it
+    /// is invisible. Scanning is cheap and idempotent: known files are
+    /// recognised by content and skipped, so this costs a directory walk.
+    private func rescanKnownLibraries() {
+        guard let store, !libraries.isEmpty else { return }
+        let roots = libraries
+        Task(priority: .background) {
+            let scanner = LibraryScanner(store: store)
+            for root in roots {
+                // A folder can live on a drive that is simply unplugged today.
+                // That is ordinary, not an error worth showing anyone.
+                guard FileManager.default.fileExists(atPath: root.path) else { continue }
+                _ = try? await scanner.scan(root: root)
+            }
+            await refresh()
+        }
+    }
+
+    func chooseLibrary() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.prompt = "Añadir"
+        panel.message = "Elige una carpeta o un disco. WhereFilm no mueve ni duplica tus originales."
+        NSApp.activate(ignoringOtherApps: true)
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        addLibrary(url)
+    }
+
+    var launchesAtLogin: Bool { SMAppService.mainApp.status == .enabled }
+
+    func setLaunchesAtLogin(_ enabled: Bool) {
+        do {
+            if enabled {
+                try SMAppService.mainApp.register()
+            } else {
+                try SMAppService.mainApp.unregister()
+            }
+            libraryError = nil
+        } catch {
+            libraryError = "No pudimos cambiar el inicio automático: \(error.localizedDescription)"
         }
     }
 
@@ -214,16 +306,80 @@ final class AppModel {
             var options = SearchEngine.Options()
             options.limit = 30
             options.variant = variant
+            options.weights.minimumVisualSimilarity = precision.minimumVisualSimilarity
+            options.minimumConfidence = precision.minimumConfidence
             let engine = SearchEngine(store: store, options: options)
 
             try? await vectorIndex?.openForSearch()
             // Only publish results if the query hasn't moved on while we worked.
-            let found = try await engine.search(plan: plan, vectorIndex: vectorIndex)
+            var found = try await engine.search(plan: plan, vectorIndex: vectorIndex)
+            // The on-device language model is an optional query enhancer, not a
+            // single point of failure. If its decomposition is too narrow, retry
+            // with the deterministic Spanish lexicon before telling someone the
+            // library has no match.
+            if found.isEmpty, plan.source == .foundationModel {
+                let fallback = await QueryPlanner(useFoundationModel: false).plan(text)
+                lastPlan = fallback
+                found = try await engine.search(plan: fallback, vectorIndex: vectorIndex)
+            }
             guard text == query else { return }
             results = found
         } catch {
             searchError = error.localizedDescription
             results = []
         }
+    }
+}
+
+enum SearchPrecision: String, CaseIterable, Identifiable {
+    case precise
+    case balanced
+    case broad
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .precise: "Precisa"
+        case .balanced: "Equilibrada"
+        case .broad: "Amplia"
+        }
+    }
+
+    var explanation: String {
+        switch self {
+        case .precise: "Solo coincidencias claras"
+        case .balanced: "La mejor opción para empezar"
+        case .broad: "Más ideas, aunque sean aproximadas"
+        }
+    }
+
+    var minimumVisualSimilarity: Float {
+        switch self {
+        case .precise: 0.16
+        case .balanced: 0.14
+        case .broad: 0.12
+        }
+    }
+
+    /// The lowest confidence worth putting on screen, on the same scale the
+    /// cards show as a percentage. Measured against the real library: a correct
+    /// match lands at 26–45%, and the tail below 10% is noise that makes the
+    /// good answers above it look less trustworthy than they are.
+    var minimumConfidence: Double {
+        switch self {
+        case .precise: 0.22
+        case .balanced: 0.10
+        case .broad: 0.03
+        }
+    }
+
+    static var saved: SearchPrecision {
+        let value = UserDefaults.standard.string(forKey: "wherefilm.searchPrecision")
+        return value.flatMap(SearchPrecision.init(rawValue:)) ?? .balanced
+    }
+
+    func save() {
+        UserDefaults.standard.set(rawValue, forKey: "wherefilm.searchPrecision")
     }
 }
