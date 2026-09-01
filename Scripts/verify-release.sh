@@ -83,7 +83,7 @@ for entry in "${CASES[@]}"; do
   [[ "$expectation" == "empty" ]] && expect_empty="WHEREFILM_QA_EXPECT_EMPTY=1"
 
   echo
-  echo "▸ “$query”   (espera: $expectation)"
+  echo "▸ “${query}”   (espera: ${expectation})"
   if env WHEREFILM_HOME="$home" \
          WHEREFILM_QA_LIBRARY="$ROOT/library" \
          WHEREFILM_DEMO_QUERY="$query" \

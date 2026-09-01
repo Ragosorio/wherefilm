@@ -35,7 +35,14 @@ struct SearchView: View {
         .foregroundStyle(WhereFilmBrand.silver)
         .tint(WhereFilmBrand.blue)
         .frame(minWidth: 820, minHeight: 620)
-        .onAppear { queryFocused = true }
+        .onAppear {
+            // Keep release QA observational: the harness supplies a query and
+            // should not leave a focused editor able to consume stray keyboard
+            // input from the machine while six cases run unattended.
+            if ProcessInfo.processInfo.environment["WHEREFILM_QA_REPORT"] == nil {
+                queryFocused = true
+            }
+        }
         .sheet(item: $selected) { result in
             MomentPlayer(result: result) { selected = nil }
                 .preferredColorScheme(.dark)

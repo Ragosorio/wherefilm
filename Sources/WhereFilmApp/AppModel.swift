@@ -76,7 +76,19 @@ final class AppModel {
 
             var options = Indexer.Options()
             options.variant = variant
-            let indexer = Indexer(store: store, vectorIndex: vectorIndex, options: options)
+            let environment = ProcessInfo.processInfo.environment
+            // A release verification must exercise the complete pipeline even
+            // when the MacBook happens to be unplugged. This is private to the
+            // QA process; normal launches still default to battery-aware Smart.
+            if environment["WHEREFILM_QA_REPORT"] != nil {
+                mode = .fullSpeed
+            }
+            let indexer = Indexer(
+                store: store,
+                vectorIndex: vectorIndex,
+                options: options,
+                governor: ResourceGovernor(settings: governorSettings)
+            )
             self.indexer = indexer
 
             modelInstalled = FileManager.default.fileExists(
@@ -100,7 +112,6 @@ final class AppModel {
             // which means the path a new person actually takes — scan, index
             // with the models inside the bundle, then search — is the one path
             // that never gets tested.
-            let environment = ProcessInfo.processInfo.environment
             if let path = environment["WHEREFILM_QA_LIBRARY"], !path.isEmpty {
                 addLibrary(URL(fileURLWithPath: (path as NSString).expandingTildeInPath))
             }
@@ -166,9 +177,10 @@ final class AppModel {
         stats = (try? store.stats()) ?? stats
         volumes = (try? store.volumes()) ?? volumes
         let decision = ResourceGovernor(settings: governorSettings).decide()
-        if !decision.isWorking || throttleReason != .none {
-            throttleReason = decision.reason
-        }
+        // A restricted decision can still allow cheap metadata work. Reporting
+        // that as simply "working" hid the fact that visual/transcription jobs
+        // were intentionally deferred on battery.
+        throttleReason = decision.reason
     }
 
     // MARK: - Governor

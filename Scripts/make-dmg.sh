@@ -22,9 +22,11 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-VERSION="${VERSION:-0.1.0}"
-DMG="build/WhereFilm-$VERSION-macOS.dmg"
-ZIP="build/WhereFilm-$VERSION-macOS.zip"
+VERSION="${VERSION:-0.1.1}"
+DMG_NAME="WhereFilm-$VERSION-macOS.dmg"
+ZIP_NAME="WhereFilm-$VERSION-macOS.zip"
+DMG="build/$DMG_NAME"
+ZIP="build/$ZIP_NAME"
 STAGING_ROOT="$(mktemp -d /private/tmp/wherefilm-dmg.XXXXXX)"
 STAGING="$STAGING_ROOT/WhereFilm"
 
@@ -78,6 +80,14 @@ TU ARCHIVO NO SALE DE TU MAC
 No hay nube, no hay cuenta y no hay copias. Tus originales se quedan
 exactamente donde están; WhereFilm solo guarda un índice y unas vistas
 previas pequeñas, en esta Mac.
+
+
+USO DE ESTA VISTA PREVIA
+
+Esta edición es experimental, para evaluación personal y no comercial.
+Apple Machine Learning Research Model is licensed under the Apple Machine
+Learning Research Model License Agreement. Encontrarás el acuerdo completo
+dentro de WhereFilm.app, en Contents/Resources/Licenses.
 README
 
 hdiutil create \
@@ -88,7 +98,10 @@ hdiutil create \
   "$DMG"
 
 ditto -c -k --sequesterRsrc --keepParent "build/WhereFilm.app" "$ZIP"
-shasum -a 256 "$DMG" "$ZIP" > "build/SHA256SUMS.txt"
+(
+  cd build
+  shasum -a 256 "$DMG_NAME" "$ZIP_NAME" > "SHA256SUMS.txt"
+)
 
 echo
 echo "Built:"

@@ -203,7 +203,7 @@ cambiar la identidad de firma y añadir `notarytool`.
 
 Funciona de punta a punta, verificado en un MacBook Air M4 con material real:
 búsqueda visual en inglés y español, transcripción en español con timestamps,
-OCR, detección de archivos movidos y borrados, previews offline. 45 pruebas
+OCR, detección de archivos movidos y borrados, previews offline. 46 pruebas
 pasando.
 
 El bundle se verifica con un comando, simulando una Mac limpia — sin modelos
@@ -262,9 +262,15 @@ Los iconos y la tarjeta de Open Graph se derivan del icono maestro con
 
 ## Licencia y créditos
 
-Código bajo MIT. Los modelos **no** se distribuyen con el repositorio:
-`Scripts/fetch-models.sh` baja MobileCLIP de `apple/coreml-mobileclip`
-(licencia Apple ASCL) y el vocabulario CLIP de `openai/clip-vit-base-patch32`.
+Código bajo MIT. Los pesos no se guardan en Git, pero la release descargable sí
+incluye MobileCLIP para que funcione sin una segunda descarga. Apple limita ese
+modelo a investigación y desarrollo académico **no comercial**; por eso esta
+edición es una vista previa experimental para evaluación personal, no una
+versión que se pueda vender ni integrar en un producto comercial. El acuerdo y
+la atribución exigida viajan dentro de la app y están en
+[`ThirdPartyLicenses/APPLE-MOBILECLIP-LICENSE.txt`](ThirdPartyLicenses/APPLE-MOBILECLIP-LICENSE.txt).
+`Scripts/fetch-models.sh` obtiene MobileCLIP de `apple/coreml-mobileclip` y el
+vocabulario CLIP de `openai/clip-vit-base-patch32`.
 
 Referencias que valieron la pena estudiar: Peakto (búsqueda conversacional con
 discos desconectados), Adobe Media Intelligence (análisis local cacheable),

@@ -31,6 +31,7 @@ enum Snapshot {
         let model = AppModel.shared
         let budget = Double(environment("WHEREFILM_QA_TIMEOUT") ?? "") ?? 240
         let deadline = Date().addingTimeInterval(budget)
+        let expectedQuery = environment("WHEREFILM_DEMO_QUERY")
 
         // Two ordered phases, not one condition.
         //
@@ -116,6 +117,9 @@ enum Snapshot {
         }
         if let error = model.searchError { failures.append("search error: \(error)") }
         if let error = model.startupError { failures.append("startup error: \(error)") }
+        if let expectedQuery, model.query != expectedQuery {
+            failures.append("query changed during QA — expected “\(expectedQuery)”, got “\(model.query)”")
+        }
         if model.stats.assets == 0 { failures.append("index is empty — nothing was verified") }
         if model.stats.moments == 0 {
             failures.append("nothing was indexed — \(model.throttleReason.label.lowercased()),"

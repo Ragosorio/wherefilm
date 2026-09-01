@@ -1,6 +1,18 @@
 import Foundation
 import WhereFilmCore
 
+private func stableBookmarkNamespace(for path: String) -> String {
+    // Swift's `hashValue` is randomized between processes, which made the same
+    // isolated QA home resolve to a different defaults key after every relaunch.
+    // FNV-1a stays deterministic without exposing the path in UserDefaults.
+    var hash: UInt64 = 14_695_981_039_346_656_037
+    for byte in path.utf8 {
+        hash ^= UInt64(byte)
+        hash &*= 1_099_511_628_211
+    }
+    return String(hash, radix: 16)
+}
+
 /// Keeps access to the folders a person explicitly selected. The original
 /// files remain in place; only bookmark tokens are persisted.
 @MainActor
@@ -16,7 +28,7 @@ final class LibraryAccess {
     private let defaultsKey: String = {
         let base = "wherefilm.libraryBookmarks.v1"
         guard let root = AppPaths.overrideRoot else { return base }
-        return "\(base).\(root.standardizedFileURL.path.hashValue)"
+        return "\(base).\(stableBookmarkNamespace(for: root.standardizedFileURL.path))"
     }()
 
     private var activeURLs: [URL] = []

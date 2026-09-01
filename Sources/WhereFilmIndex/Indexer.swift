@@ -91,7 +91,14 @@ public actor Indexer {
 
             let didWork = await runOnce(allowedTasks: decision.allowedTasks)
             if !didWork {
-                emit(.idle)
+                // Smart mode can allow only metadata while on battery or under
+                // thermal pressure. Once that subset is empty, the queue is not
+                // truly idle: heavier work is being deferred for a reason.
+                if decision.reason == .none {
+                    emit(.idle)
+                } else {
+                    emit(.throttled(decision.reason))
+                }
                 await releaseModelsIfIdle(force: true)
                 try? await vectorIndex.save()
                 try? await Task.sleep(for: .seconds(options.idlePollSeconds))

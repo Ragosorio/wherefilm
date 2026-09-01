@@ -67,6 +67,7 @@ final class SearchWindowController {
 
 /// Owns the pieces AppKit still does better than SwiftUI: the activation policy
 /// for a menu-bar-only app, and a true system-wide hotkey.
+@MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var hotKeyRef: EventHotKeyRef?
 
