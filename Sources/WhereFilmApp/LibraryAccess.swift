@@ -1,10 +1,24 @@
 import Foundation
+import WhereFilmCore
 
 /// Keeps access to the folders a person explicitly selected. The original
 /// files remain in place; only bookmark tokens are persisted.
 @MainActor
 final class LibraryAccess {
-    private let defaultsKey = "wherefilm.libraryBookmarks.v1"
+    /// Namespaced by `WHEREFILM_HOME` when one is set.
+    ///
+    /// `UserDefaults` is keyed by bundle identifier, not by the home directory,
+    /// so an isolated test run used to inherit whichever folders the *previous*
+    /// run had added — and then quietly index them. That cost real time to
+    /// diagnose: two identical-looking results that turned out to be two
+    /// different files from two different fixtures. An isolated home has to mean
+    /// isolated, or the harness cannot be trusted.
+    private let defaultsKey: String = {
+        let base = "wherefilm.libraryBookmarks.v1"
+        guard let root = AppPaths.overrideRoot else { return base }
+        return "\(base).\(root.standardizedFileURL.path.hashValue)"
+    }()
+
     private var activeURLs: [URL] = []
 
     func restore() -> [URL] {

@@ -51,8 +51,17 @@ enum Snapshot {
                !model.query.isEmpty, !model.isSearching {
                 await model.runSearch()
             }
+            // A query expected to find nothing has no "results arrived" signal,
+            // so it waits for the indexer to actually finish instead. Both
+            // conditions are needed: "no new moments for a while" alone fires
+            // during a slow video, and "nothing in flight" alone fires in the
+            // gap between two jobs — and asserting that nothing matched a
+            // quarter-built index would prove almost nothing.
+            let expectsEmpty = environment("WHEREFILM_QA_EXPECT_EMPTY") != nil
+            let indexerIdle = model.currentActivity == nil && quietPolls >= 24
+            let answered = expectsEmpty ? indexerIdle : !model.results.isEmpty
             let settled = !model.isSearching
-                && (model.query.isEmpty || !model.results.isEmpty || model.searchError != nil)
+                && (model.query.isEmpty || answered || model.searchError != nil)
             if settled, model.stats.assets > 0, model.stats.moments > 0 { break }
             try? await Task.sleep(for: .milliseconds(250))
         }
@@ -83,8 +92,17 @@ enum Snapshot {
         if let error = model.searchError { failures.append("search error: \(error)") }
         if let error = model.startupError { failures.append("startup error: \(error)") }
         if model.stats.assets == 0 { failures.append("index is empty — nothing was verified") }
-        if !model.query.isEmpty && model.results.isEmpty {
-            failures.append("the demo query returned nothing")
+
+        // A query that *should* find nothing is as much a requirement as one
+        // that should find something: "un plato de espagueti" over a library of
+        // landscapes must return zero, not the least-bad landscape.
+        let expectsEmpty = environment("WHEREFILM_QA_EXPECT_EMPTY") != nil
+        if !model.query.isEmpty {
+            if expectsEmpty, !model.results.isEmpty {
+                failures.append("a query with no honest answer returned \(model.results.count)")
+            } else if !expectsEmpty, model.results.isEmpty {
+                failures.append("the demo query returned nothing")
+            }
         }
         if model.results.contains(where: { $0.previewPath == nil }) {
             failures.append("a result has no cached preview, so its card would render blank")

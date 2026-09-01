@@ -211,6 +211,55 @@ struct SearchEngineTests {
         #expect(location.url == nil)        // can't be opened, but is still found
     }
 
+    /// Found by running the release bundle against a fresh library: searching
+    /// for something that was *said* produced a card with an empty grey
+    /// rectangle where the picture goes, because a speech moment has no keyframe
+    /// of its own.
+    @Test("A result found by its dialogue still shows a picture")
+    func transcriptResultsBorrowTheFrameOnScreen() async throws {
+        let (store, ids) = try seededStore()
+        let assetID = try #require(ids["BOTH.mov"])
+
+        // Two indexed keyframes, and a line spoken much closer to the second.
+        let moments = try store.insertMoments([
+            Moment(assetID: assetID, startSeconds: 0, endSeconds: 30),
+            Moment(assetID: assetID, startSeconds: 850, endSeconds: 880),
+        ])
+        let cache = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("wf-preview-test-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: cache, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: cache) }
+
+        for (index, moment) in moments.enumerated() {
+            let file = cache.appendingPathComponent("frame-\(index).jpg")
+            try Data("jpeg".utf8).write(to: file)
+            let momentID = try #require(moment.momentID)
+            try await store.dbPool.write { db in
+                try db.execute(sql: """
+                    INSERT INTO previews (momentID, cachePath, bytes, lastUsedAt, pinned)
+                    VALUES (?, ?, ?, ?, 0)
+                    """, arguments: [momentID, file.path, 4, Date()])
+            }
+        }
+
+        try store.insertTranscript([
+            TranscriptChunk(assetID: assetID, startSeconds: 856, endSeconds: 864,
+                            text: "el problema fue el presupuesto"),
+        ])
+
+        let engine = SearchEngine(store: store)
+        let plan = SearchPlan(rawQuery: "presupuesto", visualPhrases: [],
+                              spokenTerms: ["presupuesto"], literalTerms: ["presupuesto"],
+                              mediaType: nil, dateRange: nil, source: .literal)
+        let result = try #require(try await engine.search(plan: plan, vectorIndex: nil).first)
+
+        let preview = try #require(result.previewPath,
+                                   "a dialogue hit would render as a blank card")
+        // And specifically the frame that was on screen when the words were
+        // spoken, not merely the first one in the file.
+        #expect(preview.lastPathComponent == "frame-1.jpg")
+    }
+
     @Test("Timecodes are formatted for humans")
     func timecodeFormatting() {
         #expect(SearchResult.timecode(0) == "00:00")

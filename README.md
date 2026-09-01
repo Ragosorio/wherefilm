@@ -206,16 +206,17 @@ búsqueda visual en inglés y español, transcripción en español con timestamp
 OCR, detección de archivos movidos y borrados, previews offline. 45 pruebas
 pasando.
 
-El `.dmg` se verifica simulando una Mac limpia — sin modelos instalados y con un
-índice vacío — y dejando que la app haga todo el recorrido sola:
+El bundle se verifica con un comando, simulando una Mac limpia — sin modelos
+instalados y con un índice vacío — y dejando que la app haga todo el recorrido
+sola: escanear, indexar, buscar, dibujar.
 
 ```bash
-WHEREFILM_HOME=/tmp/fresh \
-WHEREFILM_QA_LIBRARY=/tmp/testlib \
-WHEREFILM_DEMO_QUERY="playa con olas" \
-WHEREFILM_QA_REPORT=1 \
-  build/WhereFilm.app/Contents/MacOS/WhereFilm
+./Scripts/verify-release.sh
 ```
+
+Seis casos, y los negativos cuentan igual que los positivos: *"un plato de
+espagueti"* sobre una biblioteca de paisajes tiene que devolver **cero**, no el
+paisaje menos malo.
 
 La app se autorretrata y se autoinspecciona desde su propio proceso
 ([`Snapshot.swift`](Sources/WhereFilmApp/Snapshot.swift)): reporta la geometría

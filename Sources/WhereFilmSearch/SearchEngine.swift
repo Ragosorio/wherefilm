@@ -449,9 +449,14 @@ public struct SearchEngine: Sendable {
                         : nil)
             }
 
+            let previews = PreviewLookup(store: store)
             var previewPath: URL?
             if let momentID = entry.candidate.momentID {
-                previewPath = try? PreviewLookup(store: store).url(momentID: momentID)
+                previewPath = try? previews.url(momentID: momentID)
+            }
+            if previewPath == nil {
+                previewPath = try? previews.nearestURL(assetID: entry.candidate.assetID,
+                                                      seconds: entry.candidate.start)
             }
 
             return SearchResult(
@@ -493,6 +498,31 @@ struct PreviewLookup {
         let path = try store.dbPool.read { db in
             try String.fetchOne(db, sql: "SELECT cachePath FROM previews WHERE momentID = ?",
                                 arguments: [momentID])
+        }
+        guard let path, FileManager.default.fileExists(atPath: path) else { return nil }
+        return URL(fileURLWithPath: path)
+    }
+
+    /// The frame that was on screen closest to `seconds`, anywhere in this asset.
+    ///
+    /// A transcript match is a moment of *speech*, and speech moments carry no
+    /// keyframe of their own — so searching for something that was said produced
+    /// a result card with an empty grey rectangle where the picture goes. Which
+    /// is a shame, because "donde hablaron del presupuesto" is the query the
+    /// product is proudest of.
+    ///
+    /// Showing the frame that was on screen when the words were spoken is both
+    /// the useful answer and the truthful one.
+    func nearestURL(assetID: Int64, seconds: Double) throws -> URL? {
+        let path = try store.dbPool.read { db in
+            try String.fetchOne(db, sql: """
+                SELECT p.cachePath
+                FROM previews p
+                JOIN moments m ON m.momentID = p.momentID
+                WHERE m.assetID = ?
+                ORDER BY ABS(m.startSeconds - ?) ASC
+                LIMIT 1
+                """, arguments: [assetID, seconds])
         }
         guard let path, FileManager.default.fileExists(atPath: path) else { return nil }
         return URL(fileURLWithPath: path)
