@@ -32,12 +32,21 @@ enum Snapshot {
         let budget = Double(environment("WHEREFILM_QA_TIMEOUT") ?? "") ?? 240
         let deadline = Date().addingTimeInterval(budget)
 
-        // Wait for the engine rather than for a fixed sleep. A cold start pays
-        // for compiling and loading the Core ML text encoder once, and when the
-        // run also indexes a fresh library it has to wait for the background
-        // indexer to actually produce moments — both costs differ per machine.
+        // Two ordered phases, not one condition.
+        //
+        // Written as a single "stop when there are results" loop, this was a
+        // race, and it lost both ways: it exited after two of nine moments were
+        // indexed and reported a partial library, and when the first search ran
+        // before anything existed at all it sat on that empty answer until the
+        // timeout. Indexing finishes first, then the query runs. Slower, and
+        // the same every time.
+
+        // Phase one: let the background indexer finish. A cold start also pays
+        // once for compiling and loading the Core ML encoders, and that cost
+        // differs per machine, so this waits on the queue rather than a clock.
         var lastMoments = -1
         var quietPolls = 0
+        var indexingFinished = false
         while Date() < deadline {
             if model.stats.moments != lastMoments {
                 lastMoments = model.stats.moments
@@ -45,25 +54,21 @@ enum Snapshot {
             } else {
                 quietPolls += 1
             }
-            // The indexer has stopped producing and nothing is in flight: retry
-            // the query once against everything that did get indexed.
-            if quietPolls == 8, model.stats.moments > 0, model.results.isEmpty,
-               !model.query.isEmpty, !model.isSearching {
-                await model.runSearch()
+            if model.stats.pendingJobs == 0, model.currentActivity == nil,
+               model.stats.moments > 0, quietPolls >= 8 {
+                indexingFinished = true
+                break
             }
-            // A query expected to find nothing has no "results arrived" signal,
-            // so it waits for the indexer to actually finish instead. Both
-            // conditions are needed: "no new moments for a while" alone fires
-            // during a slow video, and "nothing in flight" alone fires in the
-            // gap between two jobs — and asserting that nothing matched a
-            // quarter-built index would prove almost nothing.
-            let expectsEmpty = environment("WHEREFILM_QA_EXPECT_EMPTY") != nil
-            let indexerIdle = model.currentActivity == nil && quietPolls >= 24
-            let answered = expectsEmpty ? indexerIdle : !model.results.isEmpty
-            let settled = !model.isSearching
-                && (model.query.isEmpty || answered || model.searchError != nil)
-            if settled, model.stats.assets > 0, model.stats.moments > 0 { break }
             try? await Task.sleep(for: .milliseconds(250))
+        }
+
+        // Phase two: ask the question against the finished index. The search
+        // AppModel fired at launch may have run against a half-built one.
+        if !model.query.isEmpty {
+            await model.runSearch()
+            while model.isSearching, Date() < deadline {
+                try? await Task.sleep(for: .milliseconds(100))
+            }
         }
         // One more beat so the grid has laid out its thumbnails.
         try? await Task.sleep(for: .milliseconds(600))
@@ -82,6 +87,13 @@ enum Snapshot {
         }
 
         print("library  : \(model.stats.assets) assets · \(model.stats.moments) moments")
+        // Without this line an empty index is a mystery: the indexer could be
+        // throttled, still working, or have failed every job, and all three look
+        // identical from the outside.
+        print("indexer  : \(model.throttleReason.label.lowercased())"
+              + " · \(model.stats.pendingJobs) pending"
+              + " · \(model.stats.failedJobs) failed"
+              + (model.currentActivity.map { " · busy: \($0)" } ?? ""))
         print("query    : “\(model.query)”")
         print("results  : \(model.results.count)")
         for result in model.results.prefix(5) {
@@ -89,9 +101,29 @@ enum Snapshot {
             let preview = result.previewPath == nil ? "no preview" : "preview ok"
             print("  · \(result.displayName) — \(percent)% — \(preview)")
         }
+        // Running out of time is a failure, not a result.
+        //
+        // Before this check the harness printed OK over a library that was two
+        // moments into nine: the query happened to match one of them, and every
+        // downstream assertion passed. A verification that reports success on a
+        // quarter-built index is worse than no verification, because it is
+        // trusted.
+        if !indexingFinished {
+            failures.append("indexing did not finish within \(Int(budget))s"
+                            + " — \(model.stats.moments) moments,"
+                            + " \(model.stats.pendingJobs) still pending"
+                            + (model.currentActivity.map { ", stuck on \($0)" } ?? ""))
+        }
         if let error = model.searchError { failures.append("search error: \(error)") }
         if let error = model.startupError { failures.append("startup error: \(error)") }
         if model.stats.assets == 0 { failures.append("index is empty — nothing was verified") }
+        if model.stats.moments == 0 {
+            failures.append("nothing was indexed — \(model.throttleReason.label.lowercased()),"
+                            + " \(model.stats.pendingJobs) jobs still pending")
+        }
+        if model.stats.failedJobs > 0 {
+            failures.append("\(model.stats.failedJobs) indexing jobs failed")
+        }
 
         // A query that *should* find nothing is as much a requirement as one
         // that should find something: "un plato de espagueti" over a library of

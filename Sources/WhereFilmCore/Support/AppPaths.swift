@@ -68,6 +68,20 @@ public enum AppPaths {
         }
     }
 
+    // Deliberately absent: a routine that copies the bundled models into
+    // writable storage on first launch.
+    //
+    // It was written, measured, and removed. The theory was that a read-only
+    // bundle stops Core ML from rebuilding a stale Neural Engine artifact. The
+    // measurement said the opposite: copying the `.mlmodelc` elsewhere is itself
+    // what invalidates that artifact, so the copy *guaranteed* the ANE failure
+    // it was meant to prevent, and indexing the same seven-file fixture went
+    // from 13 seconds to 15 minutes 38 on CPU.
+    //
+    // Loaded from where it ships, the model gets the Neural Engine. The
+    // remaining risk — a machine that rejects the artifact anyway — is handled
+    // where it belongs, by the CPU fallback in `MobileCLIPLoader.load`.
+
     private static func directoryContainsFiles(_ url: URL) -> Bool {
         guard let contents = try? FileManager.default.contentsOfDirectory(
             at: url, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]

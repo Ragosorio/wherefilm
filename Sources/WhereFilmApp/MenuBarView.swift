@@ -30,6 +30,11 @@ struct MenuBarView: View {
         .padding(16)
         .frame(width: 330)
         .preferredColorScheme(.dark)
+        // Same reason as the search window: this panel paints its own near-black
+        // ground, so inheriting a light `labelColor` would not merely look wrong,
+        // it would make every line of text disappear.
+        .foregroundStyle(WhereFilmBrand.silver)
+        .tint(WhereFilmBrand.blue)
         .background(WhereFilmBrand.inkWell)
     }
 

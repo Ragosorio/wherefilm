@@ -39,6 +39,10 @@ for model in mobileclip_s0_image.mlmodelc mobileclip_s0_text.mlmodelc \
   }
 done
 
+# A copy left running from an earlier attempt competes for the same SQLite file
+# and the same Neural Engine, which shows up as an indexer that appears to hang.
+pkill -f 'WhereFilm.app/Contents/MacOS/WhereFilm' 2>/dev/null && sleep 1
+
 ROOT="$(mktemp -d /private/tmp/wherefilm-verify.XXXXXX)"
 trap '[[ ${KEEP_FIXTURE:-0} == 1 ]] || rm -rf "$ROOT"' EXIT
 

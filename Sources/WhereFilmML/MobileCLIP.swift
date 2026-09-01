@@ -97,7 +97,27 @@ enum MobileCLIPLoader {
                      computeUnits: MLComputeUnits) throws -> MLModel {
         let compiled = directory.appendingPathComponent("\(modelName).mlmodelc")
         if FileManager.default.fileExists(atPath: compiled.path) {
-            return try MLModel(contentsOf: compiled, configuration: configuration(computeUnits: computeUnits))
+            do {
+                return try MLModel(contentsOf: compiled,
+                                   configuration: configuration(computeUnits: computeUnits))
+            } catch {
+                // A compiled Core ML model carries a Neural Engine artifact that
+                // was built for one machine and one OS build. Ours is compiled on
+                // a development Mac and copied into the app, so on someone else's
+                // Mac — or after an OS update — Core ML can reject it:
+                //
+                //   ANE model load has failed for on-device compiled macho.
+                //   Must re-compile the E5 bundle.
+                //
+                // Observed for real, and the reason this fallback exists: without
+                // it the indexer simply stopped, on the one machine nobody can
+                // attach a debugger to. A CPU-only load recompiles what it needs
+                // and always works. Slower per frame, and infinitely better than
+                // a library that never finishes indexing.
+                guard computeUnits != .cpuOnly else { throw error }
+                return try MLModel(contentsOf: compiled,
+                                   configuration: configuration(computeUnits: .cpuOnly))
+            }
         }
         // Fall back to compiling an .mlpackage on first use, then cache the result
         // so the cost is paid once.
