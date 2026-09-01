@@ -40,18 +40,27 @@ final class LibraryAccess {
 
         for bookmark in bookmarks {
             var stale = false
-            guard let url = try? URL(
+            var url = try? URL(
                 resolvingBookmarkData: bookmark,
                 options: [.withSecurityScope],
                 relativeTo: nil,
                 bookmarkDataIsStale: &stale
-            ) else { continue }
+            )
+            if url == nil {
+                url = try? URL(
+                    resolvingBookmarkData: bookmark,
+                    options: [],
+                    relativeTo: nil,
+                    bookmarkDataIsStale: &stale
+                )
+            }
+            guard let resolvedURL = url else { continue }
 
-            _ = url.startAccessingSecurityScopedResource()
-            activeURLs.append(url)
-            restored.append(url)
+            _ = resolvedURL.startAccessingSecurityScopedResource()
+            activeURLs.append(resolvedURL)
+            restored.append(resolvedURL)
 
-            if stale, let replacement = try? makeBookmark(for: url) {
+            if stale, let replacement = try? makeBookmark(for: resolvedURL) {
                 refreshed.append(replacement)
             } else {
                 refreshed.append(bookmark)
@@ -75,12 +84,18 @@ final class LibraryAccess {
         // stable for the same URL.
         let alreadyStored = bookmarks.contains { data in
             var stale = false
-            guard let stored = try? URL(
+            let stored = (try? URL(
                 resolvingBookmarkData: data,
                 options: [.withSecurityScope],
                 relativeTo: nil,
                 bookmarkDataIsStale: &stale
-            ) else { return false }
+            )) ?? (try? URL(
+                resolvingBookmarkData: data,
+                options: [],
+                relativeTo: nil,
+                bookmarkDataIsStale: &stale
+            ))
+            guard let stored else { return false }
             return stored.standardizedFileURL == url.standardizedFileURL
         }
         if !alreadyStored { bookmarks.append(bookmark) }
@@ -88,10 +103,18 @@ final class LibraryAccess {
     }
 
     private func makeBookmark(for url: URL) throws -> Data {
-        try url.bookmarkData(
-            options: [.withSecurityScope, .securityScopeAllowOnlyReadAccess],
-            includingResourceValuesForKeys: nil,
-            relativeTo: nil
-        )
+        do {
+            return try url.bookmarkData(
+                options: [.withSecurityScope, .securityScopeAllowOnlyReadAccess],
+                includingResourceValuesForKeys: nil,
+                relativeTo: nil
+            )
+        } catch {
+            return try url.bookmarkData(
+                options: [],
+                includingResourceValuesForKeys: nil,
+                relativeTo: nil
+            )
+        }
     }
 }

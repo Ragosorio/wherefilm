@@ -76,10 +76,19 @@ struct SearchView: View {
                 .background(WhereFilmBrand.ophelia.opacity(0.72), in: Capsule())
                 .overlay(Capsule().stroke(WhereFilmBrand.vapor.opacity(0.14)))
 
-            Button {
-                model.chooseLibrary()
+            Menu {
+                Button {
+                    model.scanAllMediaLocations()
+                } label: {
+                    Label("Analizar fotos y videos de mi Mac", systemImage: "photo.stack")
+                }
+                Button {
+                    model.chooseLibrary()
+                } label: {
+                    Label("Añadir carpeta o disco específico…", systemImage: "folder.badge.plus")
+                }
             } label: {
-                Label("Añadir archivos", systemImage: "plus")
+                Label("Analizar archivos", systemImage: "plus")
             }
             .buttonStyle(.bordered)
             .controlSize(.large)
@@ -249,14 +258,19 @@ struct SearchView: View {
                     .symbolEffect(.pulse, options: .repeating.speed(0.35))
                 Text("Tu memoria visual empieza aquí")
                     .font(.title2.weight(.semibold))
-                Text("Elige una carpeta o un disco. WhereFilm aprenderá a encontrar tus fotos y videos sin subirlos a ninguna parte.")
+                Text("Analiza automáticamente tus fotos y videos. WhereFilm aprende a encontrar cualquier momento sin subirlos a ninguna parte.")
                     .foregroundStyle(WhereFilmBrand.vapor.opacity(0.76))
                     .multilineTextAlignment(.center)
                     .frame(maxWidth: 500)
-                Button("Elegir una carpeta…") { model.chooseLibrary() }
-                    .buttonStyle(.borderedProminent)
-                    .tint(WhereFilmBrand.blue)
-                    .controlSize(.large)
+                HStack(spacing: 12) {
+                    Button("Analizar Fotos y Videos de mi Mac") { model.scanAllMediaLocations() }
+                        .buttonStyle(.borderedProminent)
+                        .tint(WhereFilmBrand.blue)
+                        .controlSize(.large)
+                    Button("Elegir carpeta específica…") { model.chooseLibrary() }
+                        .buttonStyle(.bordered)
+                        .controlSize(.large)
+                }
             }
             .padding(34)
             .whereFilmGlass()
@@ -339,7 +353,7 @@ private struct ResultCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             ZStack(alignment: .bottomLeading) {
-                thumbnail
+                SearchResultThumbnail(result: result)
                 LinearGradient(colors: [.clear, .black.opacity(0.74)], startPoint: .center, endPoint: .bottom)
 
                 HStack {
@@ -397,20 +411,6 @@ private struct ResultCard: View {
         }
     }
 
-    private var thumbnail: some View {
-        Group {
-            if let path = result.previewPath, let image = NSImage(contentsOf: path) {
-                Image(nsImage: image).resizable().aspectRatio(contentMode: .fill)
-            } else {
-                Rectangle().fill(WhereFilmBrand.brocade)
-                    .overlay(Image(systemName: result.mediaType == .video ? "film" : "photo")
-                        .font(.title)
-                        .foregroundStyle(.secondary))
-            }
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
-
     private func evidenceText(_ evidence: Evidence) -> String {
         switch evidence {
         case .visual: "La escena coincide con tu descripción"
@@ -444,6 +444,95 @@ private struct ResultCard: View {
         case .offline: "Disco desconectado · vista previa disponible"
         case .moved: "El original cambió de lugar"
         case .missing: "Original no encontrado · índice conservado"
+        }
+    }
+}
+
+/// Dynamic thumbnail loader that handles pre-cached thumbnails, live original images,
+/// and extracted video keyframes on-the-fly without locking the UI.
+private struct SearchResultThumbnail: View {
+    let result: SearchResult
+    @State private var image: NSImage?
+    @State private var isLoading = false
+
+    var body: some View {
+        Group {
+            if let image {
+                Image(nsImage: image)
+                    .resizable()
+                    .aspectRatio(contentMode: .fill)
+            } else if isLoading {
+                ZStack {
+                    Rectangle().fill(WhereFilmBrand.brocade)
+                    ProgressView().controlSize(.small)
+                }
+            } else {
+                Rectangle().fill(WhereFilmBrand.brocade)
+                    .overlay(
+                        Image(systemName: result.mediaType == .video ? "film" : "photo")
+                            .font(.title2)
+                            .foregroundStyle(WhereFilmBrand.silver.opacity(0.45))
+                    )
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .clipped()
+        .task(id: result.id) {
+            await loadThumbnail()
+        }
+    }
+
+    private func loadThumbnail() async {
+        // 1. Try cached preview on disk first
+        if let previewPath = result.previewPath,
+           let cached = NSImage(contentsOf: previewPath) {
+            self.image = cached
+            return
+        }
+
+        // 2. Direct fallback to live original media file
+        guard let url = result.bestLocation?.url,
+              FileManager.default.fileExists(atPath: url.path) else {
+            return
+        }
+
+        isLoading = true
+        defer { isLoading = false }
+
+        let mediaType = result.mediaType
+        let startSecs = result.startSeconds
+
+        let loaded: NSImage? = await Task.detached(priority: .userInitiated) { () -> NSImage? in
+            if mediaType == .image {
+                guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else {
+                    return NSImage(contentsOf: url)
+                }
+                let options: [CFString: Any] = [
+                    kCGImageSourceCreateThumbnailFromImageAlways: true,
+                    kCGImageSourceCreateThumbnailWithTransform: true,
+                    kCGImageSourceThumbnailMaxPixelSize: 512
+                ]
+                if let cg = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) {
+                    return NSImage(cgImage: cg, size: NSSize(width: cg.width, height: cg.height))
+                }
+                return NSImage(contentsOf: url)
+            } else if mediaType == .video {
+                let asset = AVURLAsset(url: url, options: [AVURLAssetPreferPreciseDurationAndTimingKey: false])
+                let generator = AVAssetImageGenerator(asset: asset)
+                generator.appliesPreferredTrackTransform = true
+                generator.maximumSize = CGSize(width: 512, height: 512)
+                generator.requestedTimeToleranceBefore = CMTime(seconds: 0.5, preferredTimescale: 600)
+                generator.requestedTimeToleranceAfter = CMTime(seconds: 0.5, preferredTimescale: 600)
+                let time = CMTime(seconds: startSecs, preferredTimescale: 600)
+                if let (cg, _) = try? await generator.image(at: time) {
+                    return NSImage(cgImage: cg, size: NSSize(width: cg.width, height: cg.height))
+                }
+            }
+            return nil
+        }.value
+
+        if let loaded {
+            self.image = loaded
         }
     }
 }
@@ -495,7 +584,9 @@ private struct MomentPlayer: View {
     }
 
     private var displayImageURL: URL? {
-        if result.mediaType == .image, let original = result.bestLocation?.url { return original }
+        if result.mediaType == .image, let original = result.bestLocation?.url, FileManager.default.fileExists(atPath: original.path) {
+            return original
+        }
         return result.previewPath
     }
 

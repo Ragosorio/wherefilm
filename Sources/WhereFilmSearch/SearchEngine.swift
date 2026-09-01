@@ -458,6 +458,9 @@ public struct SearchEngine: Sendable {
                 previewPath = try? previews.nearestURL(assetID: entry.candidate.assetID,
                                                       seconds: entry.candidate.start)
             }
+            if previewPath == nil {
+                previewPath = try? previews.firstURL(assetID: entry.candidate.assetID)
+            }
 
             return SearchResult(
                 assetID: entry.candidate.assetID,
@@ -523,6 +526,23 @@ struct PreviewLookup {
                 ORDER BY ABS(m.startSeconds - ?) ASC
                 LIMIT 1
                 """, arguments: [assetID, seconds])
+        }
+        guard let path, FileManager.default.fileExists(atPath: path) else { return nil }
+        return URL(fileURLWithPath: path)
+    }
+
+    /// Any preview associated with this asset, useful when an asset matched via
+    /// metadata and no specific moment timecode was selected.
+    func firstURL(assetID: Int64) throws -> URL? {
+        let path = try store.dbPool.read { db in
+            try String.fetchOne(db, sql: """
+                SELECT p.cachePath
+                FROM previews p
+                JOIN moments m ON m.momentID = p.momentID
+                WHERE m.assetID = ?
+                ORDER BY m.startSeconds ASC
+                LIMIT 1
+                """, arguments: [assetID])
         }
         guard let path, FileManager.default.fileExists(atPath: path) else { return nil }
         return URL(fileURLWithPath: path)

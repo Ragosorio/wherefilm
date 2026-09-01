@@ -139,6 +139,9 @@ struct MenuBarView: View {
             action("Abrir búsqueda", symbol: "sparkle.magnifyingglass", shortcut: "⌘⇧Espacio") {
                 SearchWindowController.shared.show()
             }
+            action("Analizar fotos y videos del Mac", symbol: "photo.stack", shortcut: nil) {
+                model.scanAllMediaLocations()
+            }
             action("Añadir carpeta o disco…", symbol: "plus.rectangle.on.folder", shortcut: nil) {
                 model.chooseLibrary()
             }

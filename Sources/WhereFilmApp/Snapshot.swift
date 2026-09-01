@@ -65,7 +65,8 @@ enum Snapshot {
 
         // Phase two: ask the question against the finished index. The search
         // AppModel fired at launch may have run against a half-built one.
-        if !model.query.isEmpty {
+        if let queryToRun = expectedQuery ?? (model.query.isEmpty ? nil : model.query) {
+            model.query = queryToRun
             await model.runSearch()
             while model.isSearching, Date() < deadline {
                 try? await Task.sleep(for: .milliseconds(100))

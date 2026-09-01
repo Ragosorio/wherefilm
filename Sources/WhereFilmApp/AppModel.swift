@@ -102,16 +102,19 @@ final class AppModel {
             startRefreshLoop()
             rescanKnownLibraries()
 
+            // When running normally on a user's Mac and no libraries have been
+            // explicitly chosen yet, automatically discover and index standard
+            // media directories (Pictures, Movies, Downloads, Desktop, Documents).
+            if libraries.isEmpty,
+               environment["WHEREFILM_QA_REPORT"] == nil,
+               environment["WHEREFILM_QA_LIBRARY"] == nil {
+                scanAllMediaLocations()
+            }
+
             // Private QA hooks: let the release bundle be exercised against an
             // isolated fixture without automating keyboard input or clicking
             // through an open-file dialog. Inert in normal launches, because
             // both environment variables are absent.
-            //
-            // The library hook matters more than it looks. Without it the only
-            // way to test a downloaded copy is to hand it a folder by hand,
-            // which means the path a new person actually takes — scan, index
-            // with the models inside the bundle, then search — is the one path
-            // that never gets tested.
             if let path = environment["WHEREFILM_QA_LIBRARY"], !path.isEmpty {
                 addLibrary(URL(fileURLWithPath: (path as NSString).expandingTildeInPath))
             }
@@ -266,6 +269,35 @@ final class AppModel {
                 _ = try? await scanner.scan(root: root)
             }
             await refresh()
+        }
+    }
+
+    /// Discovers and indexes standard user media directories on macOS
+    /// (~/Pictures, ~/Movies, ~/Downloads, ~/Desktop, ~/Documents) and mounted volumes.
+    func scanAllMediaLocations() {
+        let fm = FileManager.default
+        let home = fm.homeDirectoryForCurrentUser
+
+        let mediaFolders: [URL] = [
+            home.appendingPathComponent("Pictures", isDirectory: true),
+            home.appendingPathComponent("Movies", isDirectory: true),
+            home.appendingPathComponent("Downloads", isDirectory: true),
+            home.appendingPathComponent("Desktop", isDirectory: true),
+            home.appendingPathComponent("Documents", isDirectory: true),
+        ]
+
+        for folder in mediaFolders {
+            if fm.fileExists(atPath: folder.path) {
+                addLibrary(folder)
+            }
+        }
+
+        // Also index external drives and connected storage
+        let mounted = VolumeRegistry().mountedVolumes()
+        for vol in mounted {
+            if vol.mountURL.path != "/" {
+                addLibrary(vol.mountURL)
+            }
         }
     }
 

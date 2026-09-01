@@ -22,7 +22,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-VERSION="${VERSION:-0.1.1}"
+VERSION="${VERSION:-0.1.2}"
 DMG_NAME="WhereFilm-$VERSION-macOS.dmg"
 ZIP_NAME="WhereFilm-$VERSION-macOS.zip"
 DMG="build/$DMG_NAME"
