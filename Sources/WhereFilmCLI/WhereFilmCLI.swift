@@ -83,6 +83,7 @@ struct Scan: AsyncParsableCommand {
             \(report.newAssets) new assets
             \(report.newLocations) new locations for assets already known
             \(report.rebound) already indexed
+            \(report.renamed) renamed (search text refreshed)
             \(report.markedMissing) marked missing
             \(report.skipped) skipped (too small)
             """)
@@ -117,6 +118,12 @@ struct Index: AsyncParsableCommand {
     @Flag(name: .long, help: "Ignore thermal, battery and foreground-editor throttling.")
     var fullSpeed = false
 
+    @Flag(name: .long, help: "Skip on-screen text recognition. Useful for isolating where time goes.")
+    var noOcr = false
+
+    @Option(name: .long, help: "How many jobs to run at once. Defaults to what the governor allows.")
+    var concurrency: Int?
+
     func run() async throws {
         let store = try storeOptions.makeStore()
         guard let variant = MobileCLIPVariant(rawValue: model) else {
@@ -128,15 +135,18 @@ struct Index: AsyncParsableCommand {
         guard !selected.isEmpty else { throw ValidationError("No valid tasks given.") }
 
         try await Self.runIndexing(store: store, limit: limit, tasks: selected,
-                                   variant: variant, fullSpeed: fullSpeed, quiet: false)
+                                   variant: variant, fullSpeed: fullSpeed, quiet: false,
+                                   recognizeText: !noOcr, concurrency: concurrency)
     }
 
     static func runIndexing(store: IndexStore, limit: Int, tasks: [JobTask],
-                            variant: MobileCLIPVariant, fullSpeed: Bool, quiet: Bool) async throws {
+                            variant: MobileCLIPVariant, fullSpeed: Bool, quiet: Bool,
+                            recognizeText: Bool = true, concurrency: Int? = nil) async throws {
         let vectorIndex = try makeVectorIndex(variant: variant)
 
         var indexerOptions = Indexer.Options()
         indexerOptions.variant = variant
+        indexerOptions.recognizeText = recognizeText
 
         var governorSettings = ResourceGovernor.Settings()
         governorSettings.mode = fullSpeed ? .fullSpeed : .smart
@@ -176,7 +186,18 @@ struct Index: AsyncParsableCommand {
         }
 
         let start = Date()
-        let processed = await indexer.drain(allowedTasks: decision.allowedTasks, limit: limit)
+        // The governor says what the machine may do; `--tasks` says what the
+        // person asked this invocation to do. Both constraints must hold. The
+        // previous code validated `--tasks` and then accidentally ignored it,
+        // which made isolated OCR/transcription benchmarks run unrelated jobs.
+        let allowed = decision.allowedTasks.filter(tasks.contains)
+        guard !allowed.isEmpty else {
+            print("The requested task types are currently throttled: \(decision.reason.label).")
+            print("Use --full-speed to override, or connect the Mac to power.")
+            return
+        }
+        let processed = await indexer.drain(allowedTasks: allowed, limit: limit,
+                                            concurrency: concurrency)
         let elapsed = Date().timeIntervalSince(start)
 
         print("\nProcessed \(processed) jobs in \(String(format: "%.1f", elapsed))s.")

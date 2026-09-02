@@ -15,6 +15,7 @@ public enum TranscriptionError: Error, LocalizedError {
     case localeUnsupported(String)
     case modelUnavailable
     case audioFormatUnavailable
+    case inputTerminated
 
     public var errorDescription: String? {
         switch self {
@@ -22,6 +23,7 @@ public enum TranscriptionError: Error, LocalizedError {
         case .localeUnsupported(let id): "SpeechTranscriber does not support the locale \(id)."
         case .modelUnavailable: "The on-device speech model is not installed and could not be downloaded."
         case .audioFormatUnavailable: "Could not negotiate an audio format with SpeechAnalyzer."
+        case .inputTerminated: "SpeechAnalyzer stopped accepting audio before the file ended."
         }
     }
 }
@@ -45,6 +47,10 @@ public struct Transcriber: Sendable {
         public var allowModelDownload = true
         /// Speech work is maintenance work. It should never outrank the editor.
         public var priority: TaskPriority = .background
+        /// A small, bounded amount of decoded PCM may wait for SpeechAnalyzer.
+        /// Eight buffers keep both sides busy without allowing a multi-hour
+        /// recording to materialise its entire audio track in memory.
+        public var audioBufferCapacity = 8
 
         public init(locale: Locale = Locale.current) {
             self.locale = locale
@@ -89,7 +95,8 @@ public struct Transcriber: Sendable {
             throw TranscriptionError.audioFormatUnavailable
         }
 
-        let (stream, continuation) = AsyncStream<AnalyzerInput>.makeStream()
+        let (stream, continuation) = AsyncStream<AnalyzerInput>.makeStream(
+            bufferingPolicy: .bufferingOldest(max(1, options.audioBufferCapacity)))
         let analyzer = SpeechAnalyzer(
             modules: [transcriber],
             options: .init(priority: options.priority, modelRetention: .whileInUse))
@@ -98,10 +105,27 @@ public struct Transcriber: Sendable {
         let collector = Task {
             var collected: [(CMTimeRange, String, Double?)] = []
             for try await result in transcriber.results where result.isFinal {
-                let text = String(result.text.characters)
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
-                guard !text.isEmpty else { continue }
-                collected.append((result.range, text, confidence(of: result.text)))
+                // A final result may span roughly a minute, but the attributed
+                // string carries an audio range on its smaller runs (usually a
+                // word or phrase). Keeping only `result.range` made every search
+                // hit jump to the start of that whole minute. Preserve the fine
+                // timing now; `chunk` will merge it back into searchable blocks
+                // around the requested 12 seconds.
+                var appendedTimedRun = false
+                for run in result.text.runs {
+                    guard let range = run.audioTimeRange else { continue }
+                    let text = String(result.text[run.range].characters)
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !text.isEmpty else { continue }
+                    collected.append((range, text, run.transcriptionConfidence))
+                    appendedTimedRun = true
+                }
+                if !appendedTimedRun {
+                    let text = String(result.text.characters)
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !text.isEmpty else { continue }
+                    collected.append((result.range, text, confidence(of: result.text)))
+                }
             }
             return collected
         }
@@ -198,14 +222,38 @@ public struct Transcriber: Sendable {
             let outputBuffer = try Self.convert(buffer, using: converter, to: analyzerFormat)
             guard outputBuffer.frameLength > 0 else { continue }
 
-            continuation.yield(AnalyzerInput(
+            let input = AnalyzerInput(
                 buffer: outputBuffer,
-                bufferStartTime: CMTime(value: framePosition, timescale: timescale)))
+                bufferStartTime: CMTime(value: framePosition, timescale: timescale))
+            try await yieldWithBackpressure(input, into: continuation)
             framePosition += Int64(outputBuffer.frameLength)
-            await Task.yield()
         }
 
         if reader.status == .failed, let error = reader.error { throw error }
+    }
+
+    /// `AsyncStream` is unbounded by default. AVAssetReader can decode PCM much
+    /// faster than speech recognition consumes it, so a multi-hour video used
+    /// to queue an unbounded number of AVAudioPCMBuffers. With a bounded stream,
+    /// `.dropped` means "the queue is full"; retrying after a short suspension
+    /// gives us lossless backpressure rather than dropped words or runaway RAM.
+    private func yieldWithBackpressure(
+        _ input: AnalyzerInput,
+        into continuation: AsyncStream<AnalyzerInput>.Continuation
+    ) async throws {
+        while true {
+            try Task.checkCancellation()
+            switch continuation.yield(input) {
+            case .enqueued:
+                return
+            case .dropped:
+                try await Task.sleep(for: .milliseconds(2))
+            case .terminated:
+                throw TranscriptionError.inputTerminated
+            @unknown default:
+                throw TranscriptionError.inputTerminated
+            }
+        }
     }
 
     private static func pcmBuffer(from sampleBuffer: CMSampleBuffer,

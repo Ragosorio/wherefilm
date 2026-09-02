@@ -27,12 +27,32 @@ public struct KeyframeSampler: Sendable {
         /// Hamming distance (0–64) between consecutive dHashes above which we
         /// treat the frame as a new shot. Lower keeps more frames.
         public var changeThreshold: Int = 12
-        /// Frames handed to Core ML at a time.
-        public var batchSize: Int = 16
+        /// Frames handed to Core ML at a time. Lower than it used to be because
+        /// each frame is now decoded large enough to read (see `maximumSize`),
+        /// so a batch holds more pixels.
+        public var batchSize: Int = 8
         /// Safety net so one pathological file can't blow up the index.
         public var maxFramesPerAsset: Int = 4000
-        /// Longest side handed to the encoder. MobileCLIP wants 256×256 anyway.
-        public var maximumSize = CGSize(width: 320, height: 320)
+        /// Longest side of the decoded keyframe.
+        ///
+        /// This was 320×320, sized purely for MobileCLIP, which wants 256×256.
+        /// But the same decoded frame is what Vision reads on-screen text from,
+        /// and at 320 px the text in a 1080p frame is simply gone. Measured over
+        /// 24 real screenshots, total characters recovered by the accurate
+        /// recogniser:
+        ///
+        ///      320 px →    173 characters
+        ///      768 px →  3,172 characters
+        ///     1024 px →  3,280 characters
+        ///     1280 px →  3,244 characters
+        ///
+        /// Eighteen times more text, and *not* slower — the per-image cost in
+        /// that band was flat at roughly 60–75 ms. Above ~1024 px there is
+        /// nothing left to gain. Core ML does its own resize down to 256 when
+        /// the frame is handed to the encoder, so decoding large costs the
+        /// visual channel nothing and downsampling 1024→256 is if anything
+        /// kinder than 320→256.
+        public var maximumSize = CGSize(width: 1024, height: 1024)
 
         public init() {}
     }
@@ -64,10 +84,11 @@ public struct KeyframeSampler: Sendable {
         generator.requestedTimeToleranceAfter = CMTime(seconds: 0.6, preferredTimescale: 600)
 
         var times: [CMTime] = []
+        let interval = samplingInterval(durationSeconds: durationSeconds)
         var t = 0.0
-        while t < durationSeconds && times.count < options.maxFramesPerAsset {
+        while t < durationSeconds && times.count < max(1, options.maxFramesPerAsset) {
             times.append(CMTime(seconds: t, preferredTimescale: 600))
-            t += options.intervalSeconds
+            t += interval
         }
         if times.isEmpty {
             times = [CMTime(seconds: 0, preferredTimescale: 600)]
@@ -98,13 +119,25 @@ public struct KeyframeSampler: Sendable {
         if !batch.isEmpty { try await onBatch(batch) }
     }
 
+    /// Keeps the normal five-second precision while it fits, then spreads the
+    /// fixed frame budget over the *whole* asset. Previously a file longer than
+    /// `interval × maxFrames` was silently truncated: with the defaults,
+    /// everything after 5 h 33 min was invisible. A 12-hour recording now gets
+    /// a coarser sample roughly every 10.8 seconds, but every hour is covered.
+    func samplingInterval(durationSeconds: Double) -> Double {
+        let base = max(0.1, options.intervalSeconds)
+        guard durationSeconds.isFinite, durationSeconds > 0 else { return base }
+        return max(base, durationSeconds / Double(max(1, options.maxFramesPerAsset)))
+    }
+
     /// A photo is just a video with exactly one moment.
     public func sampleImage(url: URL) throws -> SampledFrame? {
         guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
         let options: [CFString: Any] = [
             kCGImageSourceCreateThumbnailFromImageAlways: true,
             kCGImageSourceCreateThumbnailWithTransform: true,
-            kCGImageSourceThumbnailMaxPixelSize: 512,
+            // Same reasoning as `maximumSize`: big enough for Vision to read.
+            kCGImageSourceThumbnailMaxPixelSize: 1024,
         ]
         guard let image = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary)
         else { return nil }

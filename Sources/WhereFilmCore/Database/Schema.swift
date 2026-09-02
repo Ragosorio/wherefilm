@@ -156,6 +156,18 @@ public enum Schema {
                 """)
         }
 
+        // Records the version of derived analysis, independently of the app
+        // version. OCR resolution and transcript timing can improve without
+        // invalidating visual embeddings or asking someone to rebuild the
+        // entire library from scratch.
+        migrator.registerMigration("v2-analysis-state") { db in
+            try db.create(table: "analysis_state") { t in
+                t.primaryKey("key", .text)
+                t.column("version", .text).notNull()
+                t.column("updatedAt", .datetime).notNull()
+            }
+        }
+
         return migrator
     }
 }

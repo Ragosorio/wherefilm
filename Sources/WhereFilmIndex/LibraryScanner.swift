@@ -6,6 +6,7 @@ public struct ScanReport: Sendable {
     public var newAssets = 0
     public var newLocations = 0
     public var rebound = 0
+    public var renamed = 0
     public var markedMissing = 0
     public var skipped = 0
     public var errors: [String] = []
@@ -91,6 +92,7 @@ public struct LibraryScanner: Sendable {
         var seenPaths: Set<String> = []
 
         while let next = enumerator.nextObject() {
+            try Task.checkCancellation()
             guard let url = next as? URL else { continue }
             if options.excludedDirectoryNames.contains(url.lastPathComponent) {
                 enumerator.skipDescendants()
@@ -119,6 +121,7 @@ public struct LibraryScanner: Sendable {
                 case .newAsset: report.newAssets += 1
                 case .newLocation: report.newLocations += 1
                 case .rebound: report.rebound += 1
+                case .renamed: report.renamed += 1
                 }
             } catch {
                 report.errors.append("\(url.lastPathComponent): \(error.localizedDescription)")
@@ -147,6 +150,7 @@ public struct LibraryScanner: Sendable {
         case newAsset
         case newLocation
         case rebound
+        case renamed
     }
 
     func ingest(url: URL, fileSize: Int64, modifiedAt: Date?,
@@ -155,6 +159,28 @@ public struct LibraryScanner: Sendable {
             throw ScanError.unresolvedVolume(url)
         }
         seenPaths.insert(resolved.relativePath)
+
+        // Repeat scans must be proportional to the directory listing, not to
+        // the number of bytes in the library. Filesystems already maintain a
+        // cheap revision tuple for us: path + size + modification date. When it
+        // matches the catalog, no media probe or content hash can teach us
+        // anything new. This turns a rescan of 100 GB / 1 TB / 30 TB from
+        // "re-open every movie" into metadata lookups, while a changed or moved
+        // file still falls through to full content identity below.
+        if let previous = try store.location(
+            volumeUUID: resolved.volume.uuid,
+            relativePath: resolved.relativePath),
+           Self.isSameRevision(previous, fileSize: fileSize, modifiedAt: modifiedAt) {
+            try store.upsertLocation(Location(
+                locationID: previous.locationID,
+                assetID: previous.assetID,
+                volumeUUID: previous.volumeUUID,
+                relativePath: previous.relativePath,
+                fileSize: fileSize,
+                modifiedAt: modifiedAt,
+                availability: .online))
+            return .rebound
+        }
 
         let info = try await probe.probe(url: url)
         let contentKey = try ContentKey.quick(
@@ -170,6 +196,26 @@ public struct LibraryScanner: Sendable {
                 assetID: assetID, volumeUUID: resolved.volume.uuid,
                 relativePath: resolved.relativePath, fileSize: fileSize,
                 modifiedAt: modifiedAt, availability: .online))
+
+            // Identity survives a rename by design — the content key never looks
+            // at the path. But the *searchable* name did not: the filename and
+            // folder rows in the FTS index are written once, by the metadata
+            // job, and a renamed file only ever re-ran that job if it looked
+            // like a brand new asset. So renaming a file left the old name in
+            // the index and the new one unfindable. Refresh it here, where we
+            // have both names in hand and the probe has already run.
+            let filename = url.lastPathComponent
+            if filename != existing.displayName {
+                var updated = existing
+                updated.displayName = filename
+                try store.update(updated)
+                try store.indexMetadataText(
+                    assetID: assetID,
+                    filename: filename,
+                    folder: url.deletingLastPathComponent().lastPathComponent,
+                    camera: info.cameraDescription)
+                return .renamed
+            }
             return hadLocation ? .rebound : .newLocation
         }
 
@@ -196,6 +242,18 @@ public struct LibraryScanner: Sendable {
         try store.enqueue(assetID: assetID, tasks: tasks)
 
         return .newAsset
+    }
+
+    /// Both dates must exist. A filesystem that cannot provide a modification
+    /// time gets the conservative path and is probed again; silently trusting
+    /// size alone would miss replacements with equal byte counts.
+    static func isSameRevision(_ location: Location, fileSize: Int64,
+                               modifiedAt: Date?) -> Bool {
+        guard location.fileSize == fileSize,
+              let oldDate = location.modifiedAt,
+              let newDate = modifiedAt else { return false }
+        // GRDB and Foundation can round through different timestamp precisions.
+        return abs(oldDate.timeIntervalSince(newDate)) < 0.001
     }
 
 }

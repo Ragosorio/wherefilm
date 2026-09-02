@@ -68,6 +68,115 @@ struct KeyframeTests {
     func noFramesNoMoments() {
         #expect(KeyframeSampler.moments(assetID: 1, frames: [], durationSeconds: 60).isEmpty)
     }
+
+    @Test("Very long videos spread the frame budget across the whole file")
+    func longVideosCoverTheirDuration() {
+        var options = KeyframeSampler.Options()
+        options.intervalSeconds = 5
+        options.maxFramesPerAsset = 4_000
+        let sampler = KeyframeSampler(options: options)
+
+        #expect(sampler.samplingInterval(durationSeconds: 600) == 5)
+        // Twelve hours no longer means "only index the first 5 h 33 min".
+        #expect(abs(sampler.samplingInterval(durationSeconds: 43_200) - 10.8) < 0.001)
+    }
+
+    @Test("An unchanged catalog location is safe to skip without reading media")
+    func unchangedRevisionFastPath() {
+        let date = Date(timeIntervalSince1970: 1_700_000_000)
+        let location = Location(assetID: 1, volumeUUID: "V", relativePath: "film.mov",
+                                fileSize: 8_000_000_000, modifiedAt: date)
+
+        #expect(LibraryScanner.isSameRevision(location, fileSize: 8_000_000_000,
+                                              modifiedAt: date))
+        #expect(!LibraryScanner.isSameRevision(location, fileSize: 8_000_000_001,
+                                               modifiedAt: date))
+        #expect(!LibraryScanner.isSameRevision(location, fileSize: 8_000_000_000,
+                                               modifiedAt: date.addingTimeInterval(1)))
+    }
+
+    @Test("A repeat scan never opens an unchanged eight-gigabyte file")
+    func repeatScanSkipsHugeMedia() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("wf-huge-rescan-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        // This is sparse: it has an 8 GB logical size but consumes no 8 GB copy.
+        // It is intentionally not a valid movie. If the repeat scan touches the
+        // media probe, the test fails; the revision fast path must be enough.
+        let file = root.appendingPathComponent("archive.mov")
+        FileManager.default.createFile(atPath: file.path, contents: Data())
+        let handle = try FileHandle(forWritingTo: file)
+        try handle.truncate(atOffset: 8_000_000_000)
+        try handle.close()
+
+        let values = try file.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
+        let size = Int64(try #require(values.fileSize))
+        let modifiedAt = try #require(values.contentModificationDate)
+        let registry = VolumeRegistry()
+        let resolved = try #require(registry.resolve(file))
+        let store = try IndexStore.inMemory()
+        let asset = try store.insert(Asset(contentKey: "seed:huge", mediaType: .video,
+                                           displayName: file.lastPathComponent))
+        let assetID = try #require(asset.assetID)
+        try store.upsertVolume(Volume(volumeUUID: resolved.volume.uuid,
+                                      name: resolved.volume.name))
+        try store.upsertLocation(Location(
+            assetID: assetID,
+            volumeUUID: resolved.volume.uuid,
+            relativePath: resolved.relativePath,
+            fileSize: size,
+            modifiedAt: modifiedAt))
+
+        let report = try await LibraryScanner(store: store, volumes: registry).scan(root: root)
+        #expect(report.filesSeen == 1)
+        #expect(report.rebound == 1)
+        #expect(report.errors.isEmpty)
+    }
+}
+
+private actor GateProbe {
+    private var active = 0
+    private var highWaterMark = 0
+    private var completed = 0
+
+    func enter() {
+        active += 1
+        highWaterMark = max(highWaterMark, active)
+    }
+
+    func leave() {
+        active -= 1
+        completed += 1
+    }
+
+    func result() -> (peak: Int, completed: Int) { (highWaterMark, completed) }
+}
+
+@Suite("Vision request gate")
+struct VisionGateTests {
+    @Test("Thousands of queued OCR requests stay bounded and all make progress")
+    func boundedProgress() async {
+        let gate = VisionGate(limit: 2)
+        let probe = GateProbe()
+
+        await withTaskGroup(of: Void.self) { group in
+            for _ in 0..<200 {
+                group.addTask {
+                    await gate.run {
+                        await probe.enter()
+                        try? await Task.sleep(for: .microseconds(100))
+                        await probe.leave()
+                    }
+                }
+            }
+        }
+
+        let result = await probe.result()
+        #expect(result.peak <= 2)
+        #expect(result.completed == 200)
+    }
 }
 
 @Suite("Resource governor")
@@ -92,6 +201,77 @@ struct GovernorTests {
         #expect(!governor.decide().isWorking)
         // Two hours and one second later the indexer picks itself back up.
         #expect(governor.decide(now: Date().addingTimeInterval(7201)).reason != .userPaused)
+    }
+
+    @Test("Battery keeps the library becoming searchable")
+    func batteryStillIndexes() {
+        // The old policy dropped to metadata-only on battery, and the effect on
+        // a laptop was an index that never became searchable at all: files
+        // counted, zero moments, forever. Visual and OCR are exactly the two
+        // tasks that turn a file into something findable, so they must survive
+        // being unplugged.
+        var settings = ResourceGovernor.Settings()
+        settings.mode = .smart
+        let decision = ResourceGovernor(settings: settings).decide()
+
+        if decision.reason == .onBattery {
+            #expect(decision.allowedTasks.contains(.visual))
+            #expect(decision.allowedTasks.contains(.ocr))
+            // Transcription is the genuinely heavy one and still waits for power.
+            #expect(!decision.allowedTasks.contains(.transcribe))
+            #expect(decision.concurrency >= 1)
+        }
+    }
+
+    @Test("Concurrency stays within the machine, not within an old guess")
+    func concurrencyStaysBounded() {
+        // This used to assert a ceiling of 4, from the theory that workers
+        // blocking inside GRDB and AVFoundation would deadlock the cooperative
+        // pool. Measured, that ceiling cost roughly half the throughput on a
+        // photo library and prevented the machine from ever filling Vision's
+        // queue. What still has to hold is that the width is bounded by the
+        // hardware rather than unbounded.
+        var settings = ResourceGovernor.Settings()
+        settings.mode = .fullSpeed
+        let decision = ResourceGovernor(settings: settings).decide()
+        #expect(decision.concurrency >= 1)
+        #expect(decision.concurrency <= max(2, ProcessInfo.processInfo.activeProcessorCount))
+    }
+
+    @Test("Vision stays under the depth where TextRecognition corrupts memory")
+    func visionGateHonoursTheCrashCeiling() {
+        // Not a tuning preference: above roughly three concurrent
+        // RecognizeTextRequests, Apple's framework segfaults while releasing
+        // recognition results, and it also objects to Core ML or ImageIO running
+        // alongside. Raising this ceiling needs a fresh stress run, not a hunch.
+        #expect(VisionGate.crashCeiling == 2)
+        #expect(VisionGate.recommendedLimit <= VisionGate.crashCeiling)
+        #expect(VisionGate.recommendedLimit >= 1)
+    }
+
+    @Test("Heavy and light work share one memory ceiling")
+    func budgetBoundsFramesNotJobs() async {
+        // A video pass holds a whole sampler batch; a photo holds one frame. The
+        // budget is what keeps peak memory from depending on which of those the
+        // queue happens to be full of.
+        let budget = WorkBudget(capacity: 4)
+        let active = Counter()
+        await withTaskGroup(of: Void.self) { group in
+            for _ in 0..<8 {
+                group.addTask {
+                    await budget.run(cost: 3) {
+                        let peak = await active.enter()
+                        #expect(peak <= 1, "two cost-3 jobs must not share a budget of 4")
+                        try? await Task.sleep(for: .milliseconds(5))
+                        await active.leave()
+                    }
+                }
+            }
+        }
+        // A job larger than the whole budget still runs, alone, rather than
+        // deadlocking forever waiting for space that can never exist.
+        let ran = await budget.run(cost: 999) { true }
+        #expect(ran)
     }
 
     @Test("Full speed still respects a critical thermal state")
@@ -197,4 +377,12 @@ struct ModelTests {
             #expect(variant.similarityFloor < variant.similarityCeiling)
         }
     }
+}
+
+
+/// Counts how many tasks are inside a budgeted region at once.
+private actor Counter {
+    private var current = 0
+    func enter() -> Int { current += 1; return current }
+    func leave() { current -= 1 }
 }

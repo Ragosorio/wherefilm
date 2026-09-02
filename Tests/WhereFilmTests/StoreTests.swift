@@ -34,6 +34,36 @@ struct StoreTests {
         #expect(try store.locations(assetID: assetID)[0].availability == .online)
     }
 
+    @Test("Renaming a file makes the new name findable and the old one not")
+    func renameRefreshesSearchText() throws {
+        // Content identity deliberately ignores the path, so a rename keeps the
+        // same asset. The searchable *name* did not follow: the filename row is
+        // written once by the metadata job, which never re-ran for a file that
+        // was not new. The result was a file you could still find by its old
+        // name and could not find by its real one.
+        let store = try makeStore()
+        let assetID = try seedAsset(store, name: "roo pato.png")
+        try store.indexMetadataText(assetID: assetID, filename: "roo pato.png",
+                                    folder: "Fotos", camera: nil)
+
+        #expect(try !store.textSearch(pattern: "\"pato\"*", kinds: [.filename],
+                                      limit: 10).isEmpty)
+
+        // The rename, as the scanner now applies it.
+        var asset = try #require(try store.asset(id: assetID))
+        asset.displayName = "aaaaa.png"
+        try store.update(asset)
+        try store.indexMetadataText(assetID: assetID, filename: "aaaaa.png",
+                                    folder: "Fotos", camera: nil)
+
+        #expect(try store.asset(id: assetID)?.displayName == "aaaaa.png")
+        #expect(try !store.textSearch(pattern: "\"aaaaa\"*", kinds: [.filename],
+                                      limit: 10).isEmpty)
+        // And the stale name is genuinely gone, not merely outranked.
+        #expect(try store.textSearch(pattern: "\"pato\"*", kinds: [.filename],
+                                     limit: 10).isEmpty)
+    }
+
     @Test("A deleted original keeps everything the index learned about it")
     func missingKeepsIntelligence() throws {
         let store = try makeStore()
@@ -127,21 +157,36 @@ struct StoreTests {
         #expect(try store.textSearch(pattern: "\"GUATEMALA\"").count == 1)
     }
 
-    @Test("The job queue hands out each job exactly once")
-    func jobsAreClaimedOnce() throws {
+    @Test("Jobs for one asset serialize while different assets can run together")
+    func jobsAreClaimedSafely() throws {
         let store = try makeStore()
-        let assetID = try seedAsset(store)
-        try store.enqueue(assetID: assetID, tasks: [.metadata, .visual])
+        let firstAsset = try seedAsset(store, key: "q1:first")
+        let secondAsset = try seedAsset(store, key: "q1:second")
+        try store.enqueue(assetID: firstAsset, tasks: [.metadata, .visual])
+        try store.enqueue(assetID: secondAsset, tasks: [.metadata])
 
         let first = try #require(try store.claimNextJob(tasks: JobTask.allCases))
         let second = try #require(try store.claimNextJob(tasks: JobTask.allCases))
-        #expect(first.task == .metadata)   // lower priority number runs first
-        #expect(second.task == .visual)
+        #expect(first.task == .metadata)
+        #expect(second.task == .metadata)
+        #expect(first.assetID != second.assetID)
+        // The visual job for `firstAsset` cannot race its metadata job.
         #expect(try store.claimNextJob(tasks: JobTask.allCases) == nil)
 
         // A crash mid-job must not strand work forever.
         try store.requeueStaleJobs()
-        #expect(try store.claimNextJob(tasks: JobTask.allCases) != nil)
+        let retried = try #require(try store.claimNextJob(tasks: JobTask.allCases))
+        #expect(retried.task == .metadata)
+        try store.complete(job: retried)
+
+        let otherMetadata = try #require(try store.claimNextJob(tasks: JobTask.allCases))
+        #expect(otherMetadata.task == .metadata)
+        try store.complete(job: otherMetadata)
+
+        // Once the first stage finishes, the next stage for that asset unlocks.
+        let next = try #require(try store.claimNextJob(tasks: JobTask.allCases))
+        #expect(next.assetID == firstAsset)
+        #expect(next.task == .visual)
     }
 
     @Test("A job gives up after three failures")
@@ -155,6 +200,63 @@ struct StoreTests {
         }
         #expect(try store.claimNextJob(tasks: [.transcribe]) == nil)
         #expect(try store.stats().failedJobs == 1)
+    }
+
+    @Test("Analysis upgrades enqueue exactly once per algorithm version")
+    func derivedAnalysisBackfillsAreVersioned() throws {
+        let store = try makeStore()
+        var visual = Asset(contentKey: "q1:visual", mediaType: .image,
+                           indexedLevels: .visual, displayName: "sign.png")
+        visual = try store.insert(visual)
+        let visualID = try #require(visual.assetID)
+        _ = try store.insertMoments([Moment(assetID: visualID, startSeconds: 0, endSeconds: 0)])
+
+        let spokenID = try seedAsset(store, key: "q1:spoken", name: "meeting.mov")
+        try store.insertTranscript([
+            TranscriptChunk(assetID: spokenID, startSeconds: 0, endSeconds: 60,
+                            text: "presupuesto frente al mar"),
+        ])
+
+        #expect(try store.prepareOCRBackfill(version: "ocr-v1") == 1)
+        #expect(try store.prepareTranscriptionBackfill(version: "speech-v1") == 1)
+        let first = try #require(try store.claimNextJob(tasks: [.ocr, .transcribe]))
+        let second = try #require(try store.claimNextJob(tasks: [.ocr, .transcribe]))
+        #expect([first.task, second.task].contains(.ocr))
+        #expect([first.task, second.task].contains(.transcribe))
+        try store.complete(job: first)
+        try store.complete(job: second)
+
+        // Relaunching the same build does not redo anything.
+        #expect(try store.prepareOCRBackfill(version: "ocr-v1") == 0)
+        #expect(try store.prepareTranscriptionBackfill(version: "speech-v1") == 0)
+        #expect(try store.claimNextJob(tasks: [.ocr, .transcribe]) == nil)
+
+        // A future algorithm revision can selectively ask for a refresh.
+        #expect(try store.prepareOCRBackfill(version: "ocr-v2") == 1)
+        #expect(try store.claimNextJob(tasks: [.ocr])?.task == .ocr)
+    }
+
+    @Test("OCR refreshes replace stale text and visual reindex removes its FTS rows")
+    func ocrReplacementIsAtomic() throws {
+        let store = try makeStore()
+        let assetID = try seedAsset(store, key: "q1:ocr", name: "slate.png")
+        let moments = try store.insertMoments([
+            Moment(assetID: assetID, startSeconds: 0, endSeconds: 5),
+        ])
+        let momentID = try #require(moments.first?.momentID)
+        try store.insertOCR([
+            OCRText(momentID: momentID, assetID: assetID, text: "OLD SLATE"),
+        ], momentTimes: [momentID: (0, 5)])
+        #expect(try !store.textSearch(pattern: "\"old\"*", kinds: [.ocr]).isEmpty)
+
+        try store.replaceOCR(assetID: assetID, texts: [
+            OCRText(momentID: momentID, assetID: assetID, text: "NEW TEAM MEMBER"),
+        ], momentTimes: [momentID: (0, 5)])
+        #expect(try store.textSearch(pattern: "\"old\"*", kinds: [.ocr]).isEmpty)
+        #expect(try !store.textSearch(pattern: "\"member\"*", kinds: [.ocr]).isEmpty)
+
+        try store.deleteMoments(assetID: assetID)
+        #expect(try store.textSearch(pattern: "\"member\"*", kinds: [.ocr]).isEmpty)
     }
 
     @Test("Embeddings round-trip through the database")

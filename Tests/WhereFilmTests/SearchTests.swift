@@ -299,3 +299,44 @@ struct VectorTests {
         #expect(VectorCodec.decodeInt8(data, scale: scale).allSatisfy { $0 == 0 })
     }
 }
+
+@Suite("Query grounding")
+struct QueryGroundingTests {
+    @Test("Slate codes and filenames never reach the language model")
+    func identifiersStayLiteral() {
+        // Asked to describe a query with no description in it, Apple's
+        // on-device model echoes the example from the planner's own
+        // instructions: "4582" came back as visual "person wearing a blue
+        // shirt", spoken "presupuesto". Someone looking for a slate number
+        // would get strangers in blue shirts in their results.
+        for identifier in ["4582", "IMG_0042", "A004C012", "TOMA 7", "ROLLO 2", "7"] {
+            #expect(!QueryPlanner.hasDescribableContent(identifier),
+                    "\(identifier) should be searched literally, not described")
+        }
+    }
+
+    @Test("Real descriptions still reach the language model")
+    func descriptionsStillPlan() {
+        for description in ["playa al atardecer",
+                            "el que habló del presupuesto",
+                            "3 personas en la playa",
+                            "a woman in a blue shirt"] {
+            #expect(QueryPlanner.hasDescribableContent(description))
+        }
+    }
+
+    @Test("Slate vocabulary stays searchable as literal text")
+    func slateWordsSurviveAsLiterals() {
+        // "toma" is the Spanish word for a shot and is printed on clapperboards.
+        // It is correctly noise for an image encoder and was being stripped from
+        // literal search too, so `TOMA 7` could never match a slate reading
+        // "TOMA 7 - CAMARA A - ROLLO 2".
+        #expect(Lexicon.filler.contains("toma"), "toma should stay out of CLIP prompts")
+        #expect(!Lexicon.literalFiller.contains("toma"), "toma must survive into literal search")
+        // Genuine instructions to the app are still dropped from both channels.
+        for instruction in ["muéstrame", "búscame", "encuentra", "quiero", "video", "foto"] {
+            #expect(Lexicon.filler.contains(instruction))
+            #expect(Lexicon.literalFiller.contains(instruction))
+        }
+    }
+}

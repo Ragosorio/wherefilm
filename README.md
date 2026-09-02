@@ -167,6 +167,206 @@ plano, nunca una migración destructiva.
 
 ---
 
+## Cómo se lee el texto dentro de las imágenes
+
+CLIP entiende escenas; no lee. El número de una claqueta, el nombre en un gafete
+o el rótulo de una tienda los lee Vision, sobre los mismos fotogramas que ya se
+decodificaron. Eso hacía que el costo extra fuera casi cero — y también que
+durante un tiempo no sirviera de nada.
+
+El problema no era el reconocedor sino **el tamaño del fotograma**. Los
+keyframes se decodificaban a 320×320 porque es lo que MobileCLIP necesita
+(256×256), y a ese tamaño el texto de un cuadro 1080p sencillamente no existe.
+Medido sobre 24 capturas reales, caracteres recuperados por el reconocedor
+`.accurate`:
+
+| Lado mayor del fotograma | Caracteres leídos |
+|---|---|
+| 320 px | 173 |
+| 768 px | 3.172 |
+| 1024 px | 3.280 |
+| 1280 px | 3.244 |
+
+Dieciocho veces más texto — y **no más lento**: en esa banda el costo por imagen
+se mantuvo plano, entre 60 y 75 ms. Arriba de ~1024 px ya no hay nada que ganar.
+Core ML hace su propio *resize* a 256 cuando recibe el fotograma, así que el
+modelo visual conserva exactamente el mismo tamaño de entrada. Decodificar a
+1024 sí usa más memoria temporal que hacerlo a 320; por eso el lote bajó de 16
+a 8 fotogramas y el techo global de concurrencia sigue siendo conservador.
+
+Sobre un video de 10 minutos, el efecto de extremo a extremo:
+
+| | Fotogramas con texto | Caracteres indexados |
+|---|---|---|
+| Antes (320 px) | 11 | 378 |
+| Ahora (1024 px) | **41** | **15.458** |
+
+También se probó un pase barato `.fast` como filtro previo (≈6 ms contra ≈70 ms)
+para solo pagar el caro donde hubiera algo. Se descartó: sobre una cotización
+escaneada el pase rápido devolvía **cero** líneas donde el preciso encontraba
+cinco. Un documento así es justo lo que alguien busca, y perderlo para ahorrar
+siete segundos por cada diez minutos de video es un mal negocio. Queda como
+opción (`screenVideoText`), apagada.
+
+---
+
+## Por qué el indexador corre a lo ancho, pero no del todo
+
+La primera versión de esto sí paralelizaba, y **se trababa**. Una muestra de
+pila lo dejó claro: todos los hilos parados en
+
+```
+-[VNControlledCapacityTasksQueue dispatchSyncByPreservingQueueCapacity:]
+```
+
+Vision despacha por una cola con capacidad limitada, y cuando se llena **bloquea
+el hilo que llama**. El pool cooperativo de Swift tiene aproximadamente un hilo
+por núcleo y no crece para cubrir hilos bloqueados, así que con suficientes
+peticiones concurrentes no quedaba ni un hilo libre para drenar la cola que
+todos esperaban.
+
+La conclusión que se sacó entonces fue demasiado amplia, y costó cara. Se
+documentó que «el reconocimiento de texto no escala» y se fijaron dos techos:
+dos peticiones de Vision y cuatro trabajos a la vez. Vuelto a medir con cuidado
+en una M4 de 10 núcleos, 40 fotogramas reales de 1024 px con `.accurate`:
+
+| profundidad | tiempo | por fotograma |
+|---|---|---|
+| 1 | 6,16 s | 154 ms |
+| 2 | 3,11 s | 78 ms |
+| 4 | 2,14 s | 53 ms |
+| 8 | 1,35 s | 34 ms |
+| 12 | 1,46 s | 37 ms |
+
+Vision **sí escala**, 4,6× hasta la rodilla. Y como el OCR resultó ser el 93%
+del pase visual completo (14,1 s de un reel de diez minutos; 0,9 s con el OCR
+apagado), aquel techo estaba estrangulando el costo dominante de la aplicación.
+
+### Lo que sí es un límite real
+
+Subir el techo destapó un fallo que no es nuestro. Por encima de unas tres
+peticiones simultáneas, `RecognizeTextRequest` corrompe memoria dentro del
+propio framework de Apple al liberar resultados:
+
+```
+EXC_BAD_ACCESS (SIGSEGV) — KERN_INVALID_ADDRESS
+objc_release ← TextRecognition ← swift_release_dealloc ← Vision ×10
+```
+
+Medido reindexando los mismos seis reels y contando salidas distintas de cero:
+
+| profundidad | corridas caídas |
+|---|---|
+| 2 | 0/20 |
+| 3 | 0/20 |
+| 4 | 2/10 |
+| 8 | 5/10 |
+
+Es dependiente de la dosis y **no** depende de cuántos workers corran: dos de
+profundidad con doce workers está limpio; ocho de profundidad con cuatro workers
+no. Pasar por `ImageRequestHandler` en vez de `perform(on:)` no cambia nada
+(5/10 igual). Sacar MobileCLIP del Neural Engine tampoco, así que no es disputa
+por el acelerador.
+
+Y la profundidad no es el único gatillo: **el solapamiento también lo es**.
+Vision a profundidad 8 sola sobrevive; Vision a profundidad 8 con Core ML
+corriendo en paralelo muere. Por eso `VisionGate` hace ahora dos cosas: acota
+cuántas peticiones de Vision corren a la vez, y **garantiza que la codificación
+de imágenes de Core ML nunca se solape con ellas**. La exclusividad es casi
+gratis — un lote de 8 embeddings son ~40 ms contra ~530 ms de OCR del mismo
+lote — y es la diferencia entre un indexador que termina y uno que revienta en
+una biblioteca de cada siete.
+
+El techo, entonces, es 2. No es una preferencia de rendimiento: subirlo es un
+cambio de corrección, y hay una prueba que lo fija.
+
+### El cuello de botella que sí era nuestro
+
+Con Vision acotada, el resto del trabajo seguía sin correr a lo ancho — y ahí el
+culpable era el diseño propio. `Indexer` es un `actor`, y decodificar, embeber,
+generar miniaturas y escribir en SQLite eran métodos aislados en él. Doce
+workers no hacían nada que uno solo no hiciera:
+
+```
+203 fotos, sin OCR:   1 worker → 7,6 s    4 → 6,3 s    12 → 6,3 s
+```
+
+Ese es el actor serializando todo el trabajo síncrono, sin importar cuántos
+workers se pidan. Sacar el pipeline del actor lo arregla:
+
+```
+203 fotos, sin OCR:   1 worker → 8,1 s    4 → 2,7 s    12 → 2,0 s
+```
+
+Sacarlo destapó, a su vez, el mismo problema de bloqueo una capa más abajo:
+`MLModel.predictions(fromBatch:)` es síncrono y **estaciona su hilo** en un
+semáforo esperando al Neural Engine. Doce workers aparcaron los diez hilos
+cooperativos dentro de Core ML y el indexador se detuvo en seco a 0% de CPU. Por
+eso Core ML pasa hoy por el mismo portón, en exclusiva.
+
+### Las tres reglas que quedan
+
+- **`VisionGate`** — Vision compartida hasta 2; Core ML en exclusiva. Es un
+  guardia de corrección, no una perilla de velocidad.
+- **`WorkBudget`** — acota los *fotogramas decodificados vivos*, no los trabajos.
+  Una foto sostiene un fotograma; un pase de video sostiene un lote entero. Con
+  una sola cifra de concurrencia había que elegir bando: 4 workers dejaban el
+  60% de la máquina ociosa con fotos, y 8 costaban 80 MB de más con video sin
+  ganar nada. Contando fotogramas, la memoria pico deja de depender de qué haya
+  en la cola.
+- **`DecodeGate`** — acota cuántos originales a resolución completa se
+  decodifican a la vez. ImageIO tiene que materializar la imagen entera antes de
+  devolver una miniatura de 1024 px, así que una foto de 12 MP ocupa unos 48 MB
+  un instante; una docena de workers haciéndolo a la vez es medio giga de pico.
+
+### Lo medido, de punta a punta
+
+Mismo hardware, cachés derivadas borradas entre corridas, mediana de tres:
+
+| carga | antes | ahora |
+|---|---|---|
+| 203 fotos de 12 MP | 17,9 s · 193 MB | **13,9 s · 221 MB** |
+| 18 min de 1080p (6 archivos) | 10,9 s · 202 MB | **11,1 s · 178 MB** |
+
+Las fotos bajan un 30%; el video queda igual en tiempo y baja 24 MB de pico. El
+video no mejora porque es OCR de punta a punta, y el OCR está donde Apple lo
+deja. Es un resultado honesto, no el que se buscaba: **el siguiente paso real es
+sacar el OCR a procesos aparte**, donde varios ayudantes a profundidad 2
+multiplican el rendimiento y además contienen el fallo de Apple en vez de
+tumbar la aplicación. Nada de lo de arriba lo impide.
+
+Ninguna de estas cifras es una promesa universal: son de esta máquina y de estas
+muestras.
+
+---
+
+## Bibliotecas grandes y archivos de muchas horas
+
+El tamaño en gigabytes no debe convertir cada revisión de carpeta en un nuevo
+análisis. WhereFilm separa descubrir cambios de procesar contenido:
+
+- Un archivo con la misma ruta, tamaño y fecha de modificación se reconoce sin
+  abrir el contenedor, volver a calcular su identidad ni decodificar video. Una
+  prueba usa un `.mov` disperso de 8 GB que no es un video válido: la segunda
+  exploración termina bien precisamente porque nunca intenta abrirlo.
+- FSEvents solo despierta al catálogo; una exploración incremental y acotada es
+  la fuente de verdad. Un renombre en Finder actualiza nombre, ruta y búsqueda
+  sin reiniciar WhereFilm.
+- El límite de 4.000 fotogramas se reparte sobre toda la duración. Antes, con
+  muestras cada 5 s, un video de más de 5 h 33 min quedaba silenciosamente
+  truncado; ahora un archivo de 12 horas cubre las 12 horas a ~10,8 s.
+- La transcripción usa una cola acotada de ocho buffers PCM. El lector espera al
+  reconocedor en lugar de guardar en RAM el audio decodificado de un archivo de
+  varias horas.
+
+Medición sintética en la M4 de desarrollo: una hora de AAC silencioso se
+transcribió en 9,4 s con ~35 MB de memoria máxima; diez minutos de voz en español
+en 3,7 s con ~37 MB, conservando 50 bloques temporales de aproximadamente 12 s.
+Son números de esta máquina y de esas muestras, no una promesa universal de
+rendimiento.
+
+---
+
 ## Convivir con DaVinci Resolve
 
 Honestidad primero: **ningún análisis de IA es gratis.** Lo que sí se puede es
@@ -177,6 +377,11 @@ que el indexador tenga prioridad mínima y se quite de en medio.
 - Workers desechables: el modelo se carga, procesa un lote, y se libera.
 - El governor se consulta **antes de cada trabajo**: estado térmico, Low Power
   Mode, batería, y si Resolve/Premiere/FCP están al frente.
+- Con batería **sigue indexando** imágenes y texto, con la mitad de workers.
+  Antes bajaba a solo-metadatos, y en una laptop eso significaba un índice que
+  nunca llegaba a ser buscable: archivos contados, cero momentos, para siempre.
+  La transcripción, que sí es cara, espera al enchufe; por debajo del 25% de
+  carga se detiene todo menos lo casi gratis.
 - `Pause · 2h` en la barra de menús es real, y se reactiva solo.
 
 ---

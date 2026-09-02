@@ -76,11 +76,49 @@ public struct QueryPlanner: Sendable {
                               literalTerms: [], mediaType: nil, dateRange: nil, source: .literal)
         }
 
+        // A query made only of identifiers has nothing for a language model to
+        // describe, and asking anyway is not merely wasted — it is actively
+        // wrong. Measured on this build, Apple's on-device model answered:
+        //
+        //     "TOMA 7"    → visual "Two women standing together…"
+        //     "IMG_0042"  → visual "person wearing a blue shirt"
+        //     "4582"      → visual "person wearing a blue shirt",
+        //                   spoken "presupuesto"
+        //
+        // Those last two are the example sentence from the planner's own
+        // instructions, echoed back because the query gave the model nothing
+        // else to work with. Someone searching for a slate number would get
+        // shots of people in blue shirts ranked into their results.
+        //
+        // Slate codes, roll numbers and filenames are exactly what literal
+        // search is for, and it answers them in ~80 ms instead of ~1.4 s.
         if useFoundationModel, Self.foundationModelAvailable,
+           Self.hasDescribableContent(trimmed),
            let plan = try? await planWithFoundationModel(trimmed) {
             return plan
         }
         return lexiconPlan(trimmed)
+    }
+
+    /// Whether the query says anything a model could turn into a scene.
+    ///
+    /// A token carrying a digit is an identifier — `IMG_0042`, `A004C012`, `7`.
+    /// A token that is grammar (`filler`) or slate vocabulary (`toma`, `rollo`,
+    /// `camara`) is meaningful to search literally and meaningless as a
+    /// description. If nothing else is left, there is no scene to describe.
+    static func hasDescribableContent(_ query: String) -> Bool {
+        // Split on whitespace only. `IMG_0042` is one identifier, not a word
+        // called "img" next to a number, and splitting it made the guard let
+        // exactly that case through.
+        for raw in query.split(whereSeparator: \.isWhitespace) {
+            if raw.contains(where: \.isNumber) { continue }
+            let word = Lexicon.fold(String(raw)).trimmingCharacters(in: .whitespaces)
+            guard word.count >= 3,
+                  !Lexicon.filler.contains(word),
+                  !Lexicon.slateVocabulary.contains(word) else { continue }
+            return true
+        }
+        return false
     }
 
     // MARK: - Tier 1
@@ -226,7 +264,7 @@ public struct QueryPlanner: Sendable {
         terms += Lexicon.fold(remainder)
             .split(separator: " ")
             .map(String.init)
-            .filter { $0.count > 2 && !Lexicon.filler.contains($0) }
+            .filter { $0.count > 2 && !Lexicon.literalFiller.contains($0) }
 
         var seen = Set<String>()
         return terms.filter { seen.insert($0.lowercased()).inserted }

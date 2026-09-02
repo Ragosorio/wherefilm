@@ -71,7 +71,9 @@ struct MenuBarView: View {
             if model.stats.pendingJobs > 0 {
                 HStack(spacing: 8) {
                     ProgressView().controlSize(.small)
-                    Text("\(model.stats.pendingJobs.formatted()) archivos por organizar")
+                    // One asset can have visual, OCR and transcription jobs.
+                    // Calling this a file made 151 files look like 152 files.
+                    Text("\(model.stats.pendingJobs.formatted()) tareas por completar")
                         .font(.caption)
                 }
             }
@@ -148,6 +150,14 @@ struct MenuBarView: View {
 
             Divider().padding(.vertical, 8)
 
+            action(model.hidesDockIcon ? "Mostrar en el Dock" : "Ocultar del Dock",
+                   symbol: model.hidesDockIcon ? "dock.arrow.up.rectangle" : "dock.arrow.down.rectangle",
+                   shortcut: nil) {
+                model.hidesDockIcon.toggle()
+            }
+
+            Divider().padding(.vertical, 8)
+
             Button("Salir de WhereFilm") { NSApp.terminate(nil) }
                 .buttonStyle(.plain)
                 .font(.callout)
@@ -178,7 +188,8 @@ struct MenuBarView: View {
         case .userPaused: "Pausado por ti"
         case .thermal: "Esperando a que la Mac se enfríe"
         case .lowPower: "Pausado por ahorro de energía"
-        case .onBattery: "Modo ligero · usando batería"
+        case .onBattery: "Con batería · buscando imágenes y texto"
+        case .lowBattery: "Pausado · queda poca batería"
         case .editorInForeground: "Esperando mientras editas"
         }
     }

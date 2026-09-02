@@ -72,9 +72,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var hotKeyRef: EventHotKeyRef?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        // Menu-bar app: no Dock icon, no menu bar of its own, until a window is
-        // explicitly opened.
-        NSApp.setActivationPolicy(.accessory)
+        // A regular application, on purpose.
+        //
+        // This used to be `.accessory` with `LSUIElement` in the bundle, and the
+        // result was an app nobody could find: macOS keeps agent apps out of
+        // Spotlight's Applications category, out of Launchpad, out of the Dock
+        // and out of Cmd-Tab. WhereFilm looked installed and behaved like a
+        // background daemon. The menu-bar item is a convenience, not a reason to
+        // hide the whole product.
+        NSApp.setActivationPolicy(AppModel.shared.hidesDockIcon ? .accessory : .regular)
         installEditMenu()
         // Start indexing as soon as the app is alive, not when a window happens
         // to open: the point of a menu-bar app is that it works while you ignore it.
@@ -84,10 +90,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Snapshot.runIfRequested()
     }
 
-    /// An `LSUIElement` app gets no main menu, and without one the standard
-    /// editing shortcuts are dead keys — a search box you cannot paste into.
-    /// The responder chain already implements all of this; it only needs
-    /// menu items to route the key equivalents to.
+    /// A `MenuBarExtra`-only SwiftUI scene builds no main menu of its own, and
+    /// without one the standard editing shortcuts are dead keys — a search box
+    /// you cannot paste into. The responder chain already implements all of
+    /// this; it only needs menu items to route the key equivalents to.
     private func installEditMenu() {
         let mainMenu = NSMenu()
 

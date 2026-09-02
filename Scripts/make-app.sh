@@ -102,8 +102,12 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>NSHighResolutionCapable</key> <true/>
     <key>NSHumanReadableCopyright</key> <string>Copyright © 2026 WhereFilm</string>
 
-    <!-- Menu-bar app: no Dock icon until a window is opened on purpose. -->
-    <key>LSUIElement</key>             <true/>
+    <!-- Deliberately NOT LSUIElement. An agent app is invisible to Spotlight's
+         Applications category, to Launchpad, to the Dock and to Cmd-Tab, which
+         is exactly why WhereFilm did not "look like an app". It is a normal
+         application that also happens to keep a menu-bar item. Someone who
+         wants it out of the Dock can turn that on in the menu; the default is
+         to be findable. -->
 
     <!-- Deliberately absent: NSMicrophoneUsageDescription.
          Indexing reads audio tracks out of files on disk. The microphone is

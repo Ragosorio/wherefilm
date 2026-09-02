@@ -116,6 +116,34 @@ public enum Lexicon {
         "imágenes", "archivo", "archivos", "momento", "momentos", "parte",
     ]
 
+    /// Words a Spanish-speaking crew writes on a clapperboard.
+    ///
+    /// These are meaningless to an image encoder and essential to literal
+    /// search, so they need to be recognised as neither description nor noise
+    /// but as *identifiers*. A slate reading `TOMA 7 - CAMARA A - ROLLO 2` is
+    /// findable only if these survive into the literal channel, and a query made
+    /// only of them has nothing in it for a language model to describe.
+    static let slateVocabulary: Set<String> = [
+        "toma", "tomas", "rollo", "rollos", "camara", "cámara", "camaras",
+        "cámaras", "escena", "escenas", "plano", "planos", "claqueta",
+        "secuencia", "secuencias",
+    ]
+
+    /// The subset of `filler` that is also noise in a *literal* search.
+    ///
+    /// `filler` exists to keep junk out of a CLIP prompt, and for that job
+    /// "toma" is correctly noise — no image encoder is helped by it. But the
+    /// same list was stripping literal terms, and literal terms are what match
+    /// slates, filenames and on-screen text, where "toma" is the entire point.
+    ///
+    /// The effect was that `TOMA 7` could never find a slate reading
+    /// `TOMA 7 - CAMARA A - ROLLO 2`, in a tool built for crews who call a shot
+    /// a toma. Worse, stripping the query to nothing sent an empty request to
+    /// the planner, which filled the void with the example from its own
+    /// instructions. Genuine instructions to the app — "muéstrame", "búscame" —
+    /// are still dropped from both channels.
+    static let literalFiller: Set<String> = filler.subtracting(slateVocabulary)
+
     /// The table above plus every plural that Spanish morphology produces from
     /// it, longest first so multi-word phrases still win over their parts.
     ///

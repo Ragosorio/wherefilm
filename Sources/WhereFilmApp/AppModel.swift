@@ -46,11 +46,31 @@ final class AppModel {
     var modelInstalled = false
     var foundationModelStatus = ""
 
+    /// Whether to drop back to a menu-bar-only agent with no Dock icon.
+    ///
+    /// Off by default. WhereFilm shipped as an `LSUIElement` agent and the cost
+    /// was that it never appeared in Spotlight, Launchpad, the Dock or Cmd-Tab —
+    /// it was installed but unfindable. Being a normal application is the
+    /// default; hiding is a preference for people who want it, not a shape
+    /// forced on everyone.
+    var hidesDockIcon: Bool = UserDefaults.standard.bool(forKey: "hidesDockIcon") {
+        didSet {
+            UserDefaults.standard.set(hidesDockIcon, forKey: "hidesDockIcon")
+            NSApp.setActivationPolicy(hidesDockIcon ? .accessory : .regular)
+            // Coming back from .accessory leaves the app un-frontmost; without
+            // this the window is there but behind everything.
+            if !hidesDockIcon { NSApp.activate(ignoringOtherApps: true) }
+        }
+    }
+
     private(set) var store: IndexStore?
     private var vectorIndex: VectorIndex?
     private var indexer: Indexer?
     private var indexerTask: Task<Void, Never>?
     private var refreshTask: Task<Void, Never>?
+    private var rescanDebounceTask: Task<Void, Never>?
+    private var libraryScanTask: Task<Void, Never>?
+    private var libraryMonitor: LibraryChangeMonitor?
     private let libraryAccess = LibraryAccess()
     let variant = MobileCLIPVariant.s0
 
@@ -69,6 +89,11 @@ final class AppModel {
         do {
             try AppPaths.createDirectories()
             let store = try IndexStore(url: AppPaths.database)
+            // Upgrade only the derived channels whose algorithms changed. The
+            // originals, moments, embeddings and previews remain usable while
+            // these low-priority backfills run in the normal queue.
+            try store.prepareOCRBackfill(version: "vision-accurate-1024-v1")
+            try store.prepareTranscriptionBackfill(version: "speech-timed-runs-v1")
             let vectorIndex = try VectorIndex(modelID: variant.modelID,
                                               dimensions: variant.dimensions)
             self.store = store
@@ -96,6 +121,7 @@ final class AppModel {
                     .appendingPathComponent("\(variant.imageModelName).mlmodelc").path)
             foundationModelStatus = QueryPlanner.foundationModelStatus
             libraries = libraryAccess.restore()
+            restartLibraryMonitor()
 
             observeIndexer(indexer)
             startIndexer()
@@ -234,6 +260,7 @@ final class AppModel {
             if !libraries.contains(where: { $0.standardizedFileURL == url.standardizedFileURL }) {
                 libraries.append(url)
             }
+            restartLibraryMonitor()
             libraryError = nil
         } catch {
             libraryError = "No pudimos conservar el acceso a esa carpeta: \(error.localizedDescription)"
@@ -255,14 +282,17 @@ final class AppModel {
     ///
     /// Without this the app only ever sees the files that existed the moment a
     /// folder was first chosen — shoot something new, reopen WhereFilm, and it
-    /// is invisible. Scanning is cheap and idempotent: known files are
-    /// recognised by content and skipped, so this costs a directory walk.
+    /// is invisible. Scanning is cheap and idempotent: an unchanged path is
+    /// recognised by size + modification date without opening the media, so
+    /// this costs a directory walk and small database lookups.
     private func rescanKnownLibraries() {
         guard let store, !libraries.isEmpty else { return }
         let roots = libraries
-        Task(priority: .background) {
+        libraryScanTask?.cancel()
+        libraryScanTask = Task(priority: .background) {
             let scanner = LibraryScanner(store: store)
             for root in roots {
+                guard !Task.isCancelled else { return }
                 // A folder can live on a drive that is simply unplugged today.
                 // That is ordinary, not an error worth showing anyone.
                 guard FileManager.default.fileExists(atPath: root.path) else { continue }
@@ -270,6 +300,31 @@ final class AppModel {
             }
             await refresh()
         }
+    }
+
+    /// FSEvents may report a burst for one Finder operation. Wait briefly, then
+    /// do one authoritative incremental scan. Renaming a file becomes visible
+    /// without restarting the app or teaching the catalog to trust event paths.
+    private func scheduleLibraryRescan() {
+        rescanDebounceTask?.cancel()
+        rescanDebounceTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(1.25))
+            guard !Task.isCancelled else { return }
+            self?.rescanKnownLibraries()
+        }
+    }
+
+    private func restartLibraryMonitor() {
+        libraryMonitor?.stop()
+        guard !libraries.isEmpty else {
+            libraryMonitor = nil
+            return
+        }
+        let monitor = LibraryChangeMonitor(paths: libraries) { [weak self] in
+            Task { @MainActor in self?.scheduleLibraryRescan() }
+        }
+        libraryMonitor = monitor
+        _ = monitor.start()
     }
 
     /// Discovers and indexes standard user media directories on macOS

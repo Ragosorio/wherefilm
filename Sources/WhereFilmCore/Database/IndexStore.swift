@@ -160,6 +160,20 @@ public final class IndexStore: Sendable {
         }
     }
 
+    /// Finds the catalog entry for an exact path without touching the media.
+    ///
+    /// This is the hot path for repeat scans. If size and modification date are
+    /// unchanged, the scanner can refresh `lastSeenAt` and move on instead of
+    /// opening a multi-gigabyte container and hashing three regions again.
+    public func location(volumeUUID: String, relativePath: String) throws -> Location? {
+        try dbPool.read { db in
+            try Location
+                .filter(Column("volumeUUID") == volumeUUID
+                        && Column("relativePath") == relativePath)
+                .fetchOne(db)
+        }
+    }
+
     public func locations(assetIDs: [Int64]) throws -> [Int64: [Location]] {
         guard !assetIDs.isEmpty else { return [:] }
         return try dbPool.read { db in
@@ -242,6 +256,10 @@ public final class IndexStore: Sendable {
 
     public func deleteMoments(assetID: Int64) throws {
         _ = try dbPool.write { db in
+            // FTS5 is not a foreign-key child of moments, so it must be cleaned
+            // explicitly before a visual re-index creates replacement moments.
+            try db.execute(sql: "DELETE FROM search_index WHERE assetID = ? AND kind = ?",
+                           arguments: [assetID, SearchTextKind.ocr.rawValue])
             try Moment.filter(Column("assetID") == assetID).deleteAll(db)
         }
     }
@@ -334,14 +352,33 @@ public final class IndexStore: Sendable {
 
     public func insertOCR(_ texts: [OCRText], momentTimes: [Int64: (Double, Double)]) throws {
         try dbPool.write { db in
-            for ocr in texts {
-                var copy = ocr
-                try copy.insert(db)
-                let times = momentTimes[ocr.momentID] ?? (0, 0)
-                try Self.indexText(db, text: ocr.text, assetID: ocr.assetID,
-                                   momentID: ocr.momentID, kind: .ocr,
-                                   start: times.0, end: times.1)
-            }
+            try Self.insertOCR(texts, momentTimes: momentTimes, in: db)
+        }
+    }
+
+    /// Atomically swaps the OCR channel after a higher-quality backfill. If the
+    /// re-decode or recognition fails, the caller never reaches this method and
+    /// the old searchable text remains available.
+    public func replaceOCR(assetID: Int64, texts: [OCRText],
+                           momentTimes: [Int64: (Double, Double)]) throws {
+        try dbPool.write { db in
+            _ = try OCRText.filter(Column("assetID") == assetID).deleteAll(db)
+            try db.execute(sql: "DELETE FROM search_index WHERE assetID = ? AND kind = ?",
+                           arguments: [assetID, SearchTextKind.ocr.rawValue])
+            try Self.insertOCR(texts, momentTimes: momentTimes, in: db)
+        }
+    }
+
+    private static func insertOCR(_ texts: [OCRText],
+                                  momentTimes: [Int64: (Double, Double)],
+                                  in db: Database) throws {
+        for ocr in texts {
+            var copy = ocr
+            try copy.insert(db)
+            let times = momentTimes[ocr.momentID] ?? (0, 0)
+            try indexText(db, text: ocr.text, assetID: ocr.assetID,
+                          momentID: ocr.momentID, kind: .ocr,
+                          start: times.0, end: times.1)
         }
     }
 
@@ -468,9 +505,16 @@ public final class IndexStore: Sendable {
         try dbPool.write { db in
             let placeholders = databaseQuestionMarks(count: tasks.count)
             guard var job = try Job.fetchOne(db, sql: """
-                SELECT * FROM jobs
-                WHERE state = 'pending' AND task IN (\(placeholders)) AND attempts < 3
-                ORDER BY priority, jobID LIMIT 1
+                SELECT candidate.* FROM jobs AS candidate
+                WHERE candidate.state = 'pending'
+                  AND candidate.task IN (\(placeholders))
+                  AND candidate.attempts < 3
+                  AND NOT EXISTS (
+                      SELECT 1 FROM jobs AS active
+                      WHERE active.assetID = candidate.assetID
+                        AND active.state = 'running'
+                  )
+                ORDER BY candidate.priority, candidate.jobID LIMIT 1
                 """, arguments: StatementArguments(tasks.map(\.rawValue))) else { return nil }
             job.state = .running
             job.updatedAt = Date()
@@ -504,6 +548,58 @@ public final class IndexStore: Sendable {
     public func requeueStaleJobs() throws {
         try dbPool.write { db in
             try db.execute(sql: "UPDATE jobs SET state = 'pending' WHERE state = 'running'")
+        }
+    }
+
+    /// Schedules a one-time OCR refresh when the recognition pipeline changes.
+    /// Existing moments and embeddings stay intact; only the decoded keyframes
+    /// are revisited. A fresh database records the version with zero work, so
+    /// new assets rely on the inline OCR done by their visual job.
+    @discardableResult
+    public func prepareOCRBackfill(version: String) throws -> Int {
+        try prepareAnalysisBackfill(
+            key: "ocr",
+            version: version,
+            task: .ocr,
+            assetPredicate: "(a.indexedLevels & 2) != 0 AND EXISTS (SELECT 1 FROM moments m WHERE m.assetID = a.assetID)")
+    }
+
+    /// Re-runs only assets that already have speech text when timestamp
+    /// extraction improves. This replaces minute-wide jumps with fine-grained
+    /// chunks without touching files that were never transcribed.
+    @discardableResult
+    public func prepareTranscriptionBackfill(version: String) throws -> Int {
+        try prepareAnalysisBackfill(
+            key: "transcription",
+            version: version,
+            task: .transcribe,
+            assetPredicate: "EXISTS (SELECT 1 FROM transcript_chunks t WHERE t.assetID = a.assetID)")
+    }
+
+    private func prepareAnalysisBackfill(key: String, version: String, task: JobTask,
+                                         assetPredicate: String) throws -> Int {
+        try dbPool.write { db in
+            let current = try String.fetchOne(
+                db, sql: "SELECT version FROM analysis_state WHERE key = ?", arguments: [key])
+            guard current != version else { return 0 }
+
+            try db.execute(sql: """
+                INSERT INTO jobs (assetID, task, state, priority, attempts, lastError, updatedAt)
+                SELECT a.assetID, ?, 'pending', ?, 0, NULL, ?
+                FROM assets a
+                WHERE \(assetPredicate)
+                ON CONFLICT(assetID, task) DO UPDATE SET
+                    state = 'pending', attempts = 0, lastError = NULL,
+                    priority = excluded.priority, updatedAt = excluded.updatedAt
+                """, arguments: [task.rawValue, task.defaultPriority, Date()])
+            let scheduled = db.changesCount
+
+            try db.execute(sql: """
+                INSERT INTO analysis_state (key, version, updatedAt) VALUES (?, ?, ?)
+                ON CONFLICT(key) DO UPDATE SET
+                    version = excluded.version, updatedAt = excluded.updatedAt
+                """, arguments: [key, version, Date()])
+            return scheduled
         }
     }
 

@@ -66,9 +66,26 @@ CÓMO INSTALARLA
 5. Confirma "Abrir". Listo — no tendrás que repetirlo nunca más.
 
 
+SI NO APARECE EN SPOTLIGHT NI EN LAUNCHPAD
+
+Cuando una app descargada sigue marcada como "en cuarentena", macOS puede
+ejecutarla desde una copia temporal y dejar registrada esa copia en vez de
+la que está en Applications. El síntoma es exacto: la app abre, pero no
+aparece al buscarla ni en el Dock. Se arregla en una línea, en Terminal:
+
+    xattr -dr com.apple.quarantine /Applications/WhereFilm.app
+
+Después ciérrala y vuelve a abrirla desde Applications. Esto no desactiva
+Gatekeeper ni salta ninguna protección: solo le quita a esa copia la marca
+de "recién descargada", después de que tú ya la aprobaste en el paso 4.
+
+
 CÓMO USARLA
 
-· WhereFilm vive en la barra de menús, arriba a la derecha.
+· WhereFilm es una app normal: está en Applications, en Launchpad y en
+  Spotlight, y tiene su icono en el Dock mientras está abierta.
+· También vive en la barra de menús, arriba a la derecha. Si prefieres que
+  solo viva ahí, usa "Ocultar del Dock" en ese menú.
 · Pulsa ⌘ + ⇧ + Espacio para buscar en cualquier momento.
 · Añade una carpeta o un disco y deja que trabaje en segundo plano.
 · Escribe lo que recuerdas: "atardecer frente al mar",
