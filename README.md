@@ -457,9 +457,19 @@ npm run dev        # http://localhost:4321
 npm run build      # → site/dist
 ```
 
-Para desplegarla en Vercel: importar el repositorio y poner **Root Directory =
-`site`**. Vercel detecta Astro solo; el resto está en
-[`site/vercel.json`](site/vercel.json).
+Para desplegarla en Vercel basta con importar el repositorio: el
+[`vercel.json`](vercel.json) de la raíz instala y construye dentro de `site/` y
+publica `site/dist`, así que funciona sin tocar nada en el panel. Antes esto
+dependía de acordarse de poner **Root Directory = `site`** a mano, y cuando no
+estaba puesto el despliegue moría con `Could not read package.json` — Vercel
+buscaba un `package.json` en la raíz, donde nunca hubo uno. Si el Root Directory
+*sí* está en `site`, manda [`site/vercel.json`](site/vercel.json), que lleva las
+mismas cabeceras; cualquiera de los dos caminos produce el mismo sitio.
+
+Al publicar una versión nueva, el orden importa: **primero** subir los binarios
+a GitHub Releases y **después** mover `downloadURL` y `releaseURL` en
+[`index.astro`](site/src/pages/index.astro). Al revés, la página queda con un
+botón de descarga que devuelve 404.
 
 Los iconos y la tarjeta de Open Graph se derivan del icono maestro con
 `swift Scripts/make-brand-assets.swift` — antes la página servía el master de

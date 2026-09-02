@@ -2,6 +2,9 @@
 import Layout from '../layouts/Layout.astro';
 import AppMockup from '../components/AppMockup.astro';
 
+// Apuntan a la última release *publicada*. Al sacar una nueva, subir primero
+// los binarios a GitHub y recién después mover estas dos líneas: si se mueven
+// antes, la página queda con un botón de descarga que devuelve 404.
 const downloadURL = 'https://github.com/Ragosorio/wherefilm/releases/download/v0.2.0/WhereFilm-0.2.0-macOS-universal.dmg';
 const releaseURL = 'https://github.com/Ragosorio/wherefilm/releases/tag/v0.2.0';
 ---

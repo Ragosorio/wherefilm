@@ -4,7 +4,7 @@
 # from a Mac app, plus a ZIP fallback.
 #
 #   ./Scripts/make-dmg.sh
-#   VERSION=0.2.0 ./Scripts/make-dmg.sh
+#   VERSION=0.3.0 ./Scripts/make-dmg.sh
 #
 # On signing: this edition is ad-hoc signed, not signed with a paid Apple
 # Developer ID and not notarized. That is a deliberate, stated constraint, and it
@@ -22,7 +22,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-VERSION="${VERSION:-0.2.0}"
+VERSION="${VERSION:-0.3.0}"
 DMG_NAME="WhereFilm-$VERSION-macOS-universal.dmg"
 ZIP_NAME="WhereFilm-$VERSION-macOS-universal.zip"
 DMG="build/$DMG_NAME"
