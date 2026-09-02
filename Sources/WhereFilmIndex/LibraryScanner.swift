@@ -39,13 +39,17 @@ public struct LibraryScanner: Sendable {
     let store: IndexStore
     let volumes: VolumeRegistry
     let probe = MediaProbe()
+    /// Optional live policy. Discovery is cheap enough to continue in editor
+    /// quiet mode, but it yields under a user pause or critical thermal state.
+    public var governor: ResourceGovernor?
     public var options: Options
 
     public init(store: IndexStore, volumes: VolumeRegistry = VolumeRegistry(),
-                options: Options = Options()) {
+                options: Options = Options(), governor: ResourceGovernor? = nil) {
         self.store = store
         self.volumes = volumes
         self.options = options
+        self.governor = governor
     }
 
     /// Refreshes which volumes are mounted. Unplugging a drive makes its files
@@ -67,6 +71,7 @@ public struct LibraryScanner: Sendable {
 
     public func scan(root: URL,
                      progress: (@Sendable (Int, URL) -> Void)? = nil) async throws -> ScanReport {
+        try await waitForDiscoveryPermission()
         try syncVolumes()
 
         var report = ScanReport()
@@ -93,6 +98,9 @@ public struct LibraryScanner: Sendable {
 
         while let next = enumerator.nextObject() {
             try Task.checkCancellation()
+            if report.filesSeen > 0, report.filesSeen % 64 == 0 {
+                try await waitForDiscoveryPermission()
+            }
             guard let url = next as? URL else { continue }
             if options.excludedDirectoryNames.contains(url.lastPathComponent) {
                 enumerator.skipDescendants()
@@ -144,6 +152,15 @@ public struct LibraryScanner: Sendable {
         _ = try store.pruneRedundantMissingLocations()
 
         return report
+    }
+
+    private func waitForDiscoveryPermission() async throws {
+        guard let governor else { return }
+        while !Task.isCancelled {
+            if governor.decide().scanConcurrency > 0 { return }
+            try await Task.sleep(for: .seconds(2))
+        }
+        try Task.checkCancellation()
     }
 
     enum IngestOutcome {
@@ -215,6 +232,16 @@ public struct LibraryScanner: Sendable {
                     folder: url.deletingLastPathComponent().lastPathComponent,
                     camera: info.cameraDescription)
                 return .renamed
+            }
+            if !hadLocation {
+                // A move that keeps the filename still changes the searchable
+                // folder. Refresh the metadata row so an asset moved from
+                // `Exports` to `Client-A` follows the new location.
+                try store.indexMetadataText(
+                    assetID: assetID,
+                    filename: existing.displayName,
+                    folder: url.deletingLastPathComponent().lastPathComponent,
+                    camera: info.cameraDescription)
             }
             return hadLocation ? .rebound : .newLocation
         }

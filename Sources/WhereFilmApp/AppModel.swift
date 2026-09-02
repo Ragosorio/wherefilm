@@ -36,6 +36,10 @@ final class AppModel {
     var query = ""
     var results: [SearchResult] = []
     var isSearching = false
+    var isSearchTakingLong = false
+    var searchPhase: SearchPhase?
+    var firstUsefulResultMilliseconds: Double?
+    var stableResultMilliseconds: Double?
     var lastPlan: SearchPlan?
     var searchError: String?
     var precision: SearchPrecision = SearchPrecision.saved {
@@ -70,6 +74,11 @@ final class AppModel {
     private var refreshTask: Task<Void, Never>?
     private var rescanDebounceTask: Task<Void, Never>?
     private var libraryScanTask: Task<Void, Never>?
+    private var libraryScanWorkerTask: Task<[String], Never>?
+    private var libraryScanNeedsRun = false
+    private var searchTask: Task<Void, Never>?
+    private var slowSearchIndicatorTask: Task<Void, Never>?
+    private var searchGeneration = 0
     private var libraryMonitor: LibraryChangeMonitor?
     private let libraryAccess = LibraryAccess()
     let variant = MobileCLIPVariant.s0
@@ -210,6 +219,11 @@ final class AppModel {
         // that as simply "working" hid the fact that visual/transcription jobs
         // were intentionally deferred on battery.
         throttleReason = decision.reason
+        if decision.scanConcurrency > 0, libraryScanNeedsRun {
+            // Also wakes a timed pause or thermal backoff without requiring a
+            // second user action.
+            startQueuedLibraryScan()
+        }
     }
 
     // MARK: - Governor
@@ -225,6 +239,15 @@ final class AppModel {
         guard let indexer else { return }
         let settings = governorSettings
         Task { await indexer.setGovernorSettings(settings) }
+        let paused = mode == .paused || (pausedUntil ?? .distantPast) > Date()
+        if paused {
+            // A large directory walk can outlive a menu-bar pause. Cancel the
+            // actual detached worker, not only the MainActor watcher awaiting it.
+            libraryScanNeedsRun = true
+            libraryScanWorkerTask?.cancel()
+        } else if libraryScanNeedsRun {
+            startQueuedLibraryScan()
+        }
     }
 
     func pause(for duration: TimeInterval?) {
@@ -254,7 +277,7 @@ final class AppModel {
     // MARK: - Library
 
     func addLibrary(_ url: URL) {
-        guard let store else { return }
+        guard store != nil else { return }
         do {
             try libraryAccess.remember(url)
             if !libraries.contains(where: { $0.standardizedFileURL == url.standardizedFileURL }) {
@@ -265,17 +288,7 @@ final class AppModel {
         } catch {
             libraryError = "No pudimos conservar el acceso a esa carpeta: \(error.localizedDescription)"
         }
-        Task(priority: .utility) {
-            let scanner = LibraryScanner(store: store)
-            do {
-                _ = try await scanner.scan(root: url)
-            } catch {
-                await MainActor.run {
-                    self.libraryError = "No pudimos revisar esa carpeta: \(error.localizedDescription)"
-                }
-            }
-            await refresh()
-        }
+        queueLibraryScan()
     }
 
     /// Re-walks every folder the person already added, once, at launch.
@@ -286,20 +299,120 @@ final class AppModel {
     /// recognised by size + modification date without opening the media, so
     /// this costs a directory walk and small database lookups.
     private func rescanKnownLibraries() {
-        guard let store, !libraries.isEmpty else { return }
-        let roots = libraries
-        libraryScanTask?.cancel()
-        libraryScanTask = Task(priority: .background) {
-            let scanner = LibraryScanner(store: store)
-            for root in roots {
-                guard !Task.isCancelled else { return }
-                // A folder can live on a drive that is simply unplugged today.
-                // That is ordinary, not an error worth showing anyone.
-                guard FileManager.default.fileExists(atPath: root.path) else { continue }
-                _ = try? await scanner.scan(root: root)
-            }
-            await refresh()
+        queueLibraryScan()
+    }
+
+    /// Coalesces Finder bursts and several newly added folders into one scan
+    /// coordinator. Roots on one volume are walked serially; roots on separate
+    /// disks may run together only when Smart mode says the machine is free.
+    private func queueLibraryScan() {
+        libraryScanNeedsRun = true
+        startQueuedLibraryScan()
+    }
+
+    private func startQueuedLibraryScan() {
+        guard libraryScanTask == nil, libraryScanNeedsRun, let store else { return }
+
+        let roots = deduplicatedLibraryRoots()
+        guard !roots.isEmpty else {
+            libraryScanNeedsRun = false
+            return
         }
+
+        let settings = governorSettings
+        let initialDecision = ResourceGovernor(settings: settings).decide()
+        // A user pause and critical thermal state must also stop discovery work;
+        // the request stays queued and is retried when settings change.
+        guard initialDecision.scanConcurrency > 0 else { return }
+        libraryScanNeedsRun = false
+
+        let worker = Task.detached(priority: .background) { () -> [String] in
+            let governor = ResourceGovernor(settings: settings)
+            let registry = VolumeRegistry()
+            var groups: [[URL]] = []
+            var groupForKey: [String: Int] = [:]
+
+            // Never make two enumerators seek against the same disk. Separate
+            // volumes are the safe unit of parallelism for a media library.
+            for root in roots {
+                let key = registry.resolve(root)?.volume.uuid ?? root.standardizedFileURL.path
+                if let index = groupForKey[key] {
+                    groups[index].append(root)
+                } else {
+                    groupForKey[key] = groups.count
+                    groups.append([root])
+                }
+            }
+
+            var errors: [String] = []
+            let width = max(1, initialDecision.scanConcurrency)
+            var offset = 0
+            while offset < groups.count, !Task.isCancelled {
+                let end = min(groups.count, offset + width)
+                let batch = Array(groups[offset..<end])
+                let batchErrors = await withTaskGroup(of: [String].self,
+                                                       returning: [[String]].self) { group in
+                    for roots in batch {
+                        group.addTask {
+                            let scanner = LibraryScanner(
+                                store: store,
+                                governor: governor)
+                            var localErrors: [String] = []
+                            for root in roots {
+                                guard !Task.isCancelled else { break }
+                                // An unplugged drive is ordinary, not an error
+                                // worth showing in the menu bar.
+                                guard FileManager.default.fileExists(atPath: root.path) else { continue }
+                                do {
+                                    _ = try await scanner.scan(root: root)
+                                } catch {
+                                    localErrors.append("\(root.path): \(error.localizedDescription)")
+                                }
+                            }
+                            return localErrors
+                        }
+                    }
+                    var collected: [[String]] = []
+                    for await local in group { collected.append(local) }
+                    return collected
+                }
+                errors.append(contentsOf: batchErrors.flatMap { $0 })
+                offset = end
+            }
+            return errors
+        }
+        libraryScanWorkerTask = worker
+
+        libraryScanTask = Task { [weak self] in
+            let errors = await worker.value
+            guard let self else { return }
+            self.libraryScanTask = nil
+            self.libraryScanWorkerTask = nil
+            if let first = errors.first {
+                self.libraryError = "No pudimos revisar una carpeta: \(first)"
+            }
+            await self.refresh()
+            if self.libraryScanNeedsRun { self.startQueuedLibraryScan() }
+        }
+    }
+
+    /// Removes nested roots such as `~/Movies` plus `~/Movies/Projects`, which
+    /// otherwise cause every media file below the child to be probed twice.
+    private func deduplicatedLibraryRoots() -> [URL] {
+        let sorted = libraries.map(\.standardizedFileURL).sorted {
+            $0.path.count < $1.path.count
+        }
+        var kept: [URL] = []
+        for candidate in sorted {
+            let path = candidate.path
+            let covered = kept.contains { root in
+                path == root.path || path.hasPrefix(root.path.hasSuffix("/")
+                                                     ? root.path
+                                                     : root.path + "/")
+            }
+            if !covered { kept.append(candidate) }
+        }
+        return kept
     }
 
     /// FSEvents may report a burst for one Finder operation. Wait briefly, then
@@ -385,21 +498,84 @@ final class AppModel {
 
     // MARK: - Search
 
+    /// Called as the query changes. Ninety milliseconds is long enough to avoid
+    /// completing `g` after the person has typed `guy`, but short enough to feel
+    /// like direct manipulation rather than a submit form.
+    func scheduleSearch() {
+        _ = replaceSearch(after: .milliseconds(90))
+    }
+
     func runSearch() async {
-        guard let store, !query.trimmingCharacters(in: .whitespaces).isEmpty else {
+        let task = replaceSearch(after: nil)
+        await task?.value
+    }
+
+    @discardableResult
+    private func replaceSearch(after delay: Duration?) -> Task<Void, Never>? {
+        searchTask?.cancel()
+        slowSearchIndicatorTask?.cancel()
+        isSearchTakingLong = false
+        searchGeneration += 1
+        let generation = searchGeneration
+        let text = query.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        guard !text.isEmpty else {
             results = []
-            return
+            lastPlan = nil
+            searchPhase = nil
+            isSearching = false
+            return nil
         }
+
+        // One-character prefixes create a huge, low-value FTS fanout and are
+        // almost always an intermediate keystroke. Keep the previous results
+        // in place until there is enough intent to search.
+        guard text.count >= 2 else {
+            isSearching = false
+            return nil
+        }
+
+        let task = Task { [weak self] in
+            if let delay {
+                do { try await Task.sleep(for: delay) }
+                catch { return }
+            }
+            guard !Task.isCancelled else { return }
+            await self?.performSearch(text: text, generation: generation)
+        }
+        searchTask = task
+        return task
+    }
+
+    private func performSearch(text: String, generation: Int) async {
+        guard let store, generation == searchGeneration else { return }
         isSearching = true
         searchError = nil
-        defer { isSearching = false }
-
-        let text = query
+        searchPhase = nil
+        firstUsefulResultMilliseconds = nil
+        stableResultMilliseconds = nil
         let variant = variant
         let vectorIndex = vectorIndex
+        let activeIndexer = indexer
+
+        slowSearchIndicatorTask = Task { [weak self] in
+            do { try await Task.sleep(for: .milliseconds(300)) }
+            catch { return }
+            guard let self, self.searchGeneration == generation,
+                  self.isSearching, self.results.isEmpty else { return }
+            self.isSearchTakingLong = true
+        }
+
+        await activeIndexer?.beginInteractiveSearch()
 
         do {
-            let plan = await QueryPlanner().plan(text)
+            // The deterministic planner is the interactive route. Apple's local
+            // Foundation Model measured 4.76 s end-to-end on this machine; it
+            // cannot gate first feedback, and the product does not require it.
+            let plan = await QueryPlanner(useFoundationModel: false).plan(text)
+            try Task.checkCancellation()
+            guard generation == searchGeneration, text == query.trimmingCharacters(in: .whitespacesAndNewlines)
+            else { throw CancellationError() }
             lastPlan = plan
 
             var options = SearchEngine.Options()
@@ -409,23 +585,45 @@ final class AppModel {
             options.minimumConfidence = precision.minimumConfidence
             let engine = SearchEngine(store: store, options: options)
 
+            // Safe whether the shared index is a read-only mmap or the writable
+            // graph currently receiving background additions.
             try? await vectorIndex?.openForSearch()
-            // Only publish results if the query hasn't moved on while we worked.
-            var found = try await engine.search(plan: plan, vectorIndex: vectorIndex)
-            // The on-device language model is an optional query enhancer, not a
-            // single point of failure. If its decomposition is too narrow, retry
-            // with the deterministic Spanish lexicon before telling someone the
-            // library has no match.
-            if found.isEmpty, plan.source == .foundationModel {
-                let fallback = await QueryPlanner(useFoundationModel: false).plan(text)
-                lastPlan = fallback
-                found = try await engine.search(plan: fallback, vectorIndex: vectorIndex)
+            for try await update in engine.searchProgressively(plan: plan, vectorIndex: vectorIndex) {
+                try Task.checkCancellation()
+                guard generation == searchGeneration,
+                      text == query.trimmingCharacters(in: .whitespacesAndNewlines)
+                else { throw CancellationError() }
+
+                searchPhase = update.phase
+                if firstUsefulResultMilliseconds == nil, !update.results.isEmpty {
+                    firstUsefulResultMilliseconds = update.elapsedMilliseconds
+                }
+                if update.isFinal { stableResultMilliseconds = update.elapsedMilliseconds }
+
+                // Do not flash an empty fast snapshot over useful results from
+                // the previous prefix. The final empty snapshot is authoritative.
+                if !update.results.isEmpty || update.isFinal {
+                    results = update.results
+                }
+                if !update.results.isEmpty {
+                    slowSearchIndicatorTask?.cancel()
+                    isSearchTakingLong = false
+                }
             }
-            guard text == query else { return }
-            results = found
+        } catch is CancellationError {
+            // A newer query owns the UI now. Cancellation is ordinary control
+            // flow, not an error worth flashing at the person typing.
         } catch {
-            searchError = error.localizedDescription
-            results = []
+            if generation == searchGeneration {
+                searchError = error.localizedDescription
+            }
+        }
+
+        await activeIndexer?.endInteractiveSearch()
+        if generation == searchGeneration {
+            slowSearchIndicatorTask?.cancel()
+            isSearchTakingLong = false
+            isSearching = false
         }
     }
 }

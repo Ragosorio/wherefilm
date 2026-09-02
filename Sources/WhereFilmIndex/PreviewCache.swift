@@ -15,6 +15,13 @@ import WhereFilmCore
 /// The payoff is the feature that makes the product feel like magic — a result
 /// you can still *see* while the drive it came from is sitting in a drawer.
 public struct PreviewCache: Sendable {
+    struct PendingPreview {
+        let image: CGImage
+        let momentID: Int64
+        let assetID: Int64
+        let pinned: Bool
+    }
+
     public struct Budget: Sendable {
         public var maximumBytes: Int64
         public static let fiveGB = Budget(maximumBytes: 5 << 30)
@@ -41,26 +48,52 @@ public struct PreviewCache: Sendable {
     @discardableResult
     public func store(_ image: CGImage, momentID: Int64, assetID: Int64,
                       pinned: Bool = false) throws -> URL? {
-        // Shard by asset so a folder never accumulates a million entries.
-        let shard = directory.appendingPathComponent(String(format: "%03d", assetID % 512))
-        try FileManager.default.createDirectory(at: shard, withIntermediateDirectories: true)
-        let url = shard.appendingPathComponent("\(momentID).jpg")
+        try store([PendingPreview(image: image, momentID: momentID,
+                                  assetID: assetID, pinned: pinned)]).first
+    }
 
-        guard let data = Self.jpegData(from: image, maxPixelSize: maxPixelSize,
-                                       quality: jpegQuality) else { return nil }
-        try data.write(to: url, options: .atomic)
+    /// Encodes files individually but commits their catalog rows in one SQLite
+    /// transaction. `Indexer.commit` already owns a frame batch, so opening one
+    /// transaction per thumbnail needlessly serialized the hot path.
+    @discardableResult
+    func store(_ entries: [PendingPreview]) throws -> [URL] {
+        guard !entries.isEmpty else { return [] }
 
-        try store.dbPool.write { db in
-            try db.execute(sql: """
-                INSERT INTO previews (momentID, cachePath, bytes, lastUsedAt, pinned)
-                VALUES (?, ?, ?, ?, ?)
-                ON CONFLICT(momentID) DO UPDATE SET
-                    cachePath = excluded.cachePath, bytes = excluded.bytes,
-                    lastUsedAt = excluded.lastUsedAt,
-                    pinned = previews.pinned OR excluded.pinned
-                """, arguments: [momentID, url.path, Int64(data.count), Date(), pinned])
+        var rows: [(momentID: Int64, path: String, bytes: Int64, pinned: Bool)] = []
+        rows.reserveCapacity(entries.count)
+        for entry in entries {
+            // Shard by asset so a folder never accumulates a million entries.
+            let shard = directory.appendingPathComponent(
+                String(format: "%03d", entry.assetID % 512))
+            try FileManager.default.createDirectory(at: shard, withIntermediateDirectories: true)
+            let url = shard.appendingPathComponent("\(entry.momentID).jpg")
+            guard let data = Self.jpegData(from: entry.image, maxPixelSize: maxPixelSize,
+                                           quality: jpegQuality) else { continue }
+            try data.write(to: url, options: .atomic)
+            rows.append((entry.momentID, url.path, Int64(data.count), entry.pinned))
         }
-        return url
+
+        do {
+            let now = Date()
+            try store.dbPool.write { db in
+                for row in rows {
+                    try db.execute(sql: """
+                        INSERT INTO previews (momentID, cachePath, bytes, lastUsedAt, pinned)
+                        VALUES (?, ?, ?, ?, ?)
+                        ON CONFLICT(momentID) DO UPDATE SET
+                            cachePath = excluded.cachePath, bytes = excluded.bytes,
+                            lastUsedAt = excluded.lastUsedAt,
+                            pinned = previews.pinned OR excluded.pinned
+                        """, arguments: [row.momentID, row.path, row.bytes, now, row.pinned])
+                }
+            }
+        } catch {
+            // Keep a failed catalog write from leaving files that the cache does
+            // not know how to evict or regenerate.
+            for row in rows { try? FileManager.default.removeItem(atPath: row.path) }
+            throw error
+        }
+        return rows.map { URL(fileURLWithPath: $0.path) }
     }
 
     public func url(momentID: Int64) throws -> URL? {

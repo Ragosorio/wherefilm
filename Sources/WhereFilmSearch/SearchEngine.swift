@@ -86,6 +86,44 @@ public struct SearchResult: Sendable {
     }
 }
 
+public enum SearchPhase: String, Sendable {
+    case fast
+    case refined
+}
+
+/// Where the time in one search actually went.
+///
+/// Without this, tuning is guesswork: the first attempt at a prefix guard in
+/// this file made two of three benchmark queries *slower*, because the "cheap"
+/// lookup it added was a full scan of the text index. A stage breakdown turns
+/// that from a puzzle into a line of output.
+public struct SearchTimings: Sendable {
+    public private(set) var stages: [(name: String, milliseconds: Double)] = []
+
+    public init() {}
+
+    mutating func record(_ name: String, since start: DispatchTime) {
+        let elapsed = Double(DispatchTime.now().uptimeNanoseconds - start.uptimeNanoseconds) / 1e6
+        stages.append((name, elapsed))
+    }
+
+    public var summary: String {
+        stages
+            .map { "\($0.name) \(String(format: "%.2f", $0.milliseconds)) ms" }
+            .joined(separator: " · ")
+    }
+}
+
+/// One stable snapshot in a progressive search. The fast snapshot comes from
+/// FTS/metadata; the refined snapshot adds visual ANN and multimodal fusion.
+public struct SearchUpdate: Sendable {
+    public let phase: SearchPhase
+    public let results: [SearchResult]
+    public let elapsedMilliseconds: Double
+    public let isFinal: Bool
+    public var timings = SearchTimings()
+}
+
 /// Runs each channel independently and then fuses them.
 ///
 /// The important idea is that no single embedding is asked to understand
@@ -141,12 +179,23 @@ public struct SearchEngine: Sendable {
 
     let store: IndexStore
     let volumes: VolumeRegistry
+    private let embeddingProvider: any QueryEmbeddingProviding
     public var options: Options
 
     public init(store: IndexStore, volumes: VolumeRegistry = VolumeRegistry(),
                 options: Options = Options()) {
         self.store = store
         self.volumes = volumes
+        self.embeddingProvider = QueryEmbeddingCache.shared
+        self.options = options
+    }
+
+    init(store: IndexStore, volumes: VolumeRegistry = VolumeRegistry(),
+         options: Options = Options(),
+         embeddingProvider: any QueryEmbeddingProviding) {
+        self.store = store
+        self.volumes = volumes
+        self.embeddingProvider = embeddingProvider
         self.options = options
     }
 
@@ -159,13 +208,75 @@ public struct SearchEngine: Sendable {
     }
 
     public func search(plan: SearchPlan, vectorIndex: VectorIndex?) async throws -> [SearchResult] {
-        var candidates: [Candidate] = []
+        let text = try textCandidates(plan: plan)
+        let visual = try await visualCandidates(plan: plan, vectorIndex: vectorIndex)
+        try Task.checkCancellation()
+        return try build(results: fuse(text + visual))
+    }
 
-        candidates += try await visualCandidates(plan: plan, vectorIndex: vectorIndex)
-        candidates += try textCandidates(plan: plan)
+    /// The part of search that never needs Core ML or the vector index.
+    public func searchFast(plan: SearchPlan) throws -> [SearchResult] {
+        try build(results: fuse(textCandidates(plan: plan)))
+    }
 
-        let merged = fuse(candidates)
-        return try build(results: merged)
+    /// Publishes useful text/metadata matches first and a fully fused ranking
+    /// later. Cancelling the consuming task cancels the work behind the stream.
+    public func searchProgressively(
+        plan: SearchPlan,
+        vectorIndex: VectorIndex?
+    ) -> AsyncThrowingStream<SearchUpdate, Error> {
+        AsyncThrowingStream { continuation in
+            let worker = Task {
+                let started = Date()
+                var timings = SearchTimings()
+                var mark = DispatchTime.now()
+                do {
+                    try Task.checkCancellation()
+                    let text = try textCandidates(plan: plan)
+                    timings.record("text", since: mark); mark = DispatchTime.now()
+                    let fused = fuse(text)
+                    timings.record("fuse", since: mark); mark = DispatchTime.now()
+                    let fast = try build(results: fused)
+                    timings.record("hydrate", since: mark); mark = DispatchTime.now()
+                    try Task.checkCancellation()
+
+                    let hasRefinement = plan.hasVisualSignal
+                    continuation.yield(SearchUpdate(
+                        phase: .fast,
+                        results: fast,
+                        elapsedMilliseconds: Date().timeIntervalSince(started) * 1_000,
+                        isFinal: !hasRefinement,
+                        timings: timings
+                    ))
+
+                    guard hasRefinement else {
+                        continuation.finish()
+                        return
+                    }
+
+                    let visual = try await visualCandidates(
+                        plan: plan, vectorIndex: vectorIndex, timings: &timings)
+                    mark = DispatchTime.now()
+                    try Task.checkCancellation()
+                    let refinedFusion = fuse(text + visual)
+                    timings.record("fuse2", since: mark); mark = DispatchTime.now()
+                    let refined = try build(results: refinedFusion)
+                    timings.record("hydrate2", since: mark)
+                    try Task.checkCancellation()
+                    continuation.yield(SearchUpdate(
+                        phase: .refined,
+                        results: refined,
+                        elapsedMilliseconds: Date().timeIntervalSince(started) * 1_000,
+                        isFinal: true,
+                        timings: timings
+                    ))
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+            continuation.onTermination = { @Sendable _ in worker.cancel() }
+        }
     }
 
     // MARK: - Channels
@@ -185,19 +296,31 @@ public struct SearchEngine: Sendable {
     }
 
     private func visualCandidates(plan: SearchPlan, vectorIndex: VectorIndex?) async throws -> [Candidate] {
-        guard plan.hasVisualSignal else { return [] }
+        var ignored = SearchTimings()
+        return try await visualCandidates(plan: plan, vectorIndex: vectorIndex, timings: &ignored)
+    }
 
-        let encoder: MobileCLIPTextEncoder
+    private func visualCandidates(plan: SearchPlan, vectorIndex: VectorIndex?,
+                                  timings: inout SearchTimings) async throws -> [Candidate] {
+        guard plan.hasVisualSignal else { return [] }
+        var mark = DispatchTime.now()
+
+        let query: [Float]
         do {
-            encoder = try MobileCLIPTextEncoder(variant: options.variant)
+            query = try await embeddingProvider.embedding(
+                for: plan.visualPhrases,
+                variant: options.variant
+            )
+        } catch is CancellationError {
+            throw CancellationError()
         } catch {
             // No visual model installed yet: text search still works. Degrading
             // is better than failing.
             return []
         }
-
-        let query = try encoder.encodeEnsemble(plan.visualPhrases)
+        timings.record("encode", since: mark); mark = DispatchTime.now()
         guard !query.isEmpty else { return [] }
+        try Task.checkCancellation()
 
         let hits: [VectorIndex.Hit]
         if let vectorIndex, await vectorIndex.count > 0 {
@@ -210,8 +333,10 @@ public struct SearchEngine: Sendable {
                 query: query, limit: options.channelDepth)
         }
 
+        timings.record("ann", since: mark); mark = DispatchTime.now()
         let usable = hits.filter { $0.similarity >= visualFloor }
         let moments = try store.moments(ids: usable.map(\.momentID))
+        timings.record("moments", since: mark)
         let phrase = plan.visualPhrases.first ?? plan.rawQuery
         return usable.compactMap { hit in
             guard let moment = moments[hit.momentID] else { return nil }
@@ -223,55 +348,123 @@ public struct SearchEngine: Sendable {
         }
     }
 
+    private static let ocrKinds: [SearchTextKind] = [.ocr]
+    private static let metadataKinds: [SearchTextKind] = [.filename, .folder, .metadata, .note]
+
     private func textCandidates(plan: SearchPlan) throws -> [Candidate] {
         var candidates: [Candidate] = []
+        let breadth = PrefixBudget(store: store)
 
-        if !plan.spokenTerms.isEmpty,
-           let pattern = Self.ftsPattern(for: plan.spokenTerms) {
-            for hit in try store.textSearch(pattern: pattern, kinds: [.transcript],
-                                            limit: options.channelDepth) {
-                candidates.append(Candidate(
-                    assetID: hit.assetID, momentID: nil,
-                    seconds: hit.startSeconds, endSeconds: hit.endSeconds,
-                    channel: .transcript, rawScore: hit.score,
-                    evidence: .transcript(text: hit.text, seconds: hit.startSeconds)))
-            }
+        let spokenPattern = plan.spokenTerms.isEmpty
+            ? nil : Self.ftsPattern(for: plan.spokenTerms, budget: breadth)
+        let literalPattern = plan.literalTerms.isEmpty
+            ? nil : Self.ftsPattern(for: plan.literalTerms, budget: breadth)
+
+        // The transcript channel and the literal channels usually run the same
+        // words. When they do, they are one MATCH and one bm25 pass, split three
+        // ways — not three identical scans of the same index.
+        if let literalPattern, literalPattern == spokenPattern {
+            let groups = try store.textSearch(
+                pattern: literalPattern,
+                groups: [[.transcript], Self.ocrKinds, Self.metadataKinds],
+                limitPerGroup: options.channelDepth)
+            candidates += transcriptCandidates(groups[0])
+            candidates += ocrCandidates(groups[1])
+            candidates += metadataCandidates(groups[2])
+            return candidates
         }
 
-        if !plan.literalTerms.isEmpty,
-           let pattern = Self.ftsPattern(for: plan.literalTerms) {
-            for hit in try store.textSearch(pattern: pattern, kinds: [.ocr],
-                                            limit: options.channelDepth) {
-                candidates.append(Candidate(
-                    assetID: hit.assetID, momentID: hit.momentID,
-                    seconds: hit.startSeconds, endSeconds: hit.endSeconds,
-                    channel: .ocr, rawScore: hit.score,
-                    evidence: .onScreenText(text: hit.text)))
-            }
-            for hit in try store.textSearch(pattern: pattern,
-                                            kinds: [.filename, .folder, .metadata, .note],
-                                            limit: options.channelDepth) {
-                candidates.append(Candidate(
-                    assetID: hit.assetID, momentID: nil,
-                    seconds: 0, endSeconds: 0,
-                    channel: .metadata, rawScore: hit.score,
-                    evidence: .metadata(text: hit.text, kind: hit.kind)))
-            }
+        if let spokenPattern {
+            let groups = try store.textSearch(
+                pattern: spokenPattern, groups: [[.transcript]],
+                limitPerGroup: options.channelDepth)
+            candidates += transcriptCandidates(groups[0])
         }
-
+        if let literalPattern {
+            let groups = try store.textSearch(
+                pattern: literalPattern, groups: [Self.ocrKinds, Self.metadataKinds],
+                limitPerGroup: options.channelDepth)
+            candidates += ocrCandidates(groups[0])
+            candidates += metadataCandidates(groups[1])
+        }
         return candidates
     }
 
+    private func transcriptCandidates(_ hits: [IndexStore.TextHit]) -> [Candidate] {
+        hits.map { hit in
+            Candidate(assetID: hit.assetID, momentID: nil,
+                      seconds: hit.startSeconds, endSeconds: hit.endSeconds,
+                      channel: .transcript, rawScore: hit.score,
+                      evidence: .transcript(text: hit.text, seconds: hit.startSeconds))
+        }
+    }
+
+    private func ocrCandidates(_ hits: [IndexStore.TextHit]) -> [Candidate] {
+        hits.map { hit in
+            Candidate(assetID: hit.assetID, momentID: hit.momentID,
+                      seconds: hit.startSeconds, endSeconds: hit.endSeconds,
+                      channel: .ocr, rawScore: hit.score,
+                      evidence: .onScreenText(text: hit.text))
+        }
+    }
+
+    private func metadataCandidates(_ hits: [IndexStore.TextHit]) -> [Candidate] {
+        hits.map { hit in
+            Candidate(assetID: hit.assetID, momentID: nil,
+                      seconds: 0, endSeconds: 0,
+                      channel: .metadata, rawScore: hit.score,
+                      evidence: .metadata(text: hit.text, kind: hit.kind))
+        }
+    }
+
+    /// Decides, per term, whether a prefix wildcard is affordable.
+    ///
+    /// The wildcard exists so a half-typed "presupuest" still finds
+    /// "presupuesto", which is worth real money in an incremental search box.
+    /// What it must not do is quietly turn one word into a third of the library:
+    /// measured on a 1.5 M-row index, `"man"*` matched 516,849 rows because
+    /// Spanish is full of words like *manera*, and ranking them took 490 ms —
+    /// per channel, three times over.
+    ///
+    /// So the wildcard is kept wherever it is cheap and dropped where it is not,
+    /// using FTS5's own term dictionary to tell the difference. That is a
+    /// measurement, not a guess about word length: the same three letters are
+    /// harmless in one library and ruinous in another, and only the vocabulary
+    /// knows which.
+    struct PrefixBudget {
+        let store: IndexStore
+
+        /// How many documents a prefix may reach before the wildcard is dropped.
+        ///
+        /// Derived from measurement rather than taste. Ranking matched rows
+        /// costs about a microsecond each on this hardware — 62 K rows took
+        /// 50 ms, 517 K took 490 ms — so this is a latency budget written in the
+        /// only unit the index can check in advance. It deliberately does not
+        /// scale with library size: a prefix that reaches 500 K documents is not
+        /// completing anybody's spelling, whether the library holds a million
+        /// rows or fifty.
+        static let maximumDocuments = 50_000
+
+        func allowsWildcard(after term: String) -> Bool {
+            // A failed lookup must not silently narrow the search. Keeping the
+            // wildcard is the behaviour this guard is an optimisation of.
+            guard let breadth = try? store.prefixBreadth(term.lowercased()) else { return true }
+            return breadth <= Self.maximumDocuments
+        }
+    }
+
     /// Builds a valid FTS5 MATCH expression. Multi-word terms become quoted
-    /// phrases; single words get a prefix wildcard so "presupuest" still finds
-    /// "presupuesto".
-    static func ftsPattern(for terms: [String]) -> String? {
+    /// phrases; single words get a prefix wildcard when the index says it is
+    /// affordable.
+    static func ftsPattern(for terms: [String], budget: PrefixBudget? = nil) -> String? {
         let pieces = terms.compactMap { term -> String? in
             let cleaned = term
                 .replacingOccurrences(of: "\"", with: " ")
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             guard cleaned.count >= 2 else { return nil }
-            return cleaned.contains(" ") ? "\"\(cleaned)\"" : "\"\(cleaned)\"*"
+            if cleaned.contains(" ") { return "\"\(cleaned)\"" }
+            let wildcard = budget?.allowsWildcard(after: cleaned) ?? true
+            return wildcard ? "\"\(cleaned)\"*" : "\"\(cleaned)\""
         }
         guard !pieces.isEmpty else { return nil }
         return pieces.joined(separator: " OR ")
@@ -427,7 +620,43 @@ public struct SearchEngine: Sendable {
         let assets = try store.assets(ids: assetIDs)
         let locationsByAsset = try store.locations(assetIDs: assetIDs)
 
-        return top.compactMap { entry -> SearchResult? in
+        // Hydration used to be the quiet N+1 in this method: up to three preview
+        // queries per card and one volume lookup per location, so thirty results
+        // could issue a hundred round trips before anything reached the screen.
+        // The answers are the same; they are now fetched in three.
+        let volumeUUIDs = Array(Set(locationsByAsset.values.flatMap { $0 }.map(\.volumeUUID)))
+        let volumeRecords = (try? store.volumes(uuids: volumeUUIDs)) ?? [:]
+
+        let exactMomentIDs = top.compactMap(\.candidate.momentID)
+        let exactPreviews = (try? store.previewPaths(momentIDs: exactMomentIDs)) ?? [:]
+        // Only the cards that did not already resolve a preview need the
+        // nearest-frame fallback. Keep one target per card: several results can
+        // belong to the same asset but point at different moments.
+        var fallbackTargets: [(assetID: Int64, seconds: Double)] = []
+        var fallbackTargetByCard: [Int: Int] = [:]
+        for (cardIndex, entry) in top.enumerated() {
+            if let momentID = entry.candidate.momentID,
+               let path = exactPreviews[momentID],
+               FileManager.default.fileExists(atPath: path) { continue }
+            fallbackTargetByCard[cardIndex] = fallbackTargets.count
+            fallbackTargets.append((entry.candidate.assetID, entry.candidate.start))
+        }
+        let nearestPreviews = fallbackTargets.isEmpty
+            ? [:]
+            : (try? store.nearestPreviewPaths(targets: fallbackTargets)) ?? [:]
+
+        func previewURL(cardIndex: Int, momentID: Int64?) -> URL? {
+            if let momentID, let path = exactPreviews[momentID],
+               FileManager.default.fileExists(atPath: path) {
+                return URL(fileURLWithPath: path)
+            }
+            guard let requestID = fallbackTargetByCard[cardIndex],
+                  let path = nearestPreviews[requestID],
+                  FileManager.default.fileExists(atPath: path) else { return nil }
+            return URL(fileURLWithPath: path)
+        }
+
+        return top.enumerated().compactMap { cardIndex, entry -> SearchResult? in
             guard let asset = assets[entry.candidate.assetID] else { return nil }
 
             // Evidence means "this signal matched the query". Nearby dialogue
@@ -439,7 +668,7 @@ public struct SearchEngine: Sendable {
 
             let locations = (locationsByAsset[entry.candidate.assetID] ?? []).map { location in
                 ResolvedLocation(
-                    volumeName: (try? store.volume(uuid: location.volumeUUID))?.name ?? "Unknown volume",
+                    volumeName: volumeRecords[location.volumeUUID]?.name ?? "Unknown volume",
                     volumeUUID: location.volumeUUID,
                     relativePath: location.relativePath,
                     availability: location.availability,
@@ -449,18 +678,8 @@ public struct SearchEngine: Sendable {
                         : nil)
             }
 
-            let previews = PreviewLookup(store: store)
-            var previewPath: URL?
-            if let momentID = entry.candidate.momentID {
-                previewPath = try? previews.url(momentID: momentID)
-            }
-            if previewPath == nil {
-                previewPath = try? previews.nearestURL(assetID: entry.candidate.assetID,
-                                                      seconds: entry.candidate.start)
-            }
-            if previewPath == nil {
-                previewPath = try? previews.firstURL(assetID: entry.candidate.assetID)
-            }
+            let previewPath = previewURL(cardIndex: cardIndex,
+                                         momentID: entry.candidate.momentID)
 
             return SearchResult(
                 assetID: entry.candidate.assetID,
@@ -489,62 +708,5 @@ public struct SearchEngine: Sendable {
             perAsset[entry.candidate.assetID] = count + 1
             return true
         }
-    }
-}
-
-/// Read-only preview lookup, so the search layer doesn't need to depend on the
-/// indexing module just to show a thumbnail.
-struct PreviewLookup {
-    let store: IndexStore
-
-    func url(momentID: Int64) throws -> URL? {
-        let path = try store.dbPool.read { db in
-            try String.fetchOne(db, sql: "SELECT cachePath FROM previews WHERE momentID = ?",
-                                arguments: [momentID])
-        }
-        guard let path, FileManager.default.fileExists(atPath: path) else { return nil }
-        return URL(fileURLWithPath: path)
-    }
-
-    /// The frame that was on screen closest to `seconds`, anywhere in this asset.
-    ///
-    /// A transcript match is a moment of *speech*, and speech moments carry no
-    /// keyframe of their own — so searching for something that was said produced
-    /// a result card with an empty grey rectangle where the picture goes. Which
-    /// is a shame, because "donde hablaron del presupuesto" is the query the
-    /// product is proudest of.
-    ///
-    /// Showing the frame that was on screen when the words were spoken is both
-    /// the useful answer and the truthful one.
-    func nearestURL(assetID: Int64, seconds: Double) throws -> URL? {
-        let path = try store.dbPool.read { db in
-            try String.fetchOne(db, sql: """
-                SELECT p.cachePath
-                FROM previews p
-                JOIN moments m ON m.momentID = p.momentID
-                WHERE m.assetID = ?
-                ORDER BY ABS(m.startSeconds - ?) ASC
-                LIMIT 1
-                """, arguments: [assetID, seconds])
-        }
-        guard let path, FileManager.default.fileExists(atPath: path) else { return nil }
-        return URL(fileURLWithPath: path)
-    }
-
-    /// Any preview associated with this asset, useful when an asset matched via
-    /// metadata and no specific moment timecode was selected.
-    func firstURL(assetID: Int64) throws -> URL? {
-        let path = try store.dbPool.read { db in
-            try String.fetchOne(db, sql: """
-                SELECT p.cachePath
-                FROM previews p
-                JOIN moments m ON m.momentID = p.momentID
-                WHERE m.assetID = ?
-                ORDER BY m.startSeconds ASC
-                LIMIT 1
-                """, arguments: [assetID])
-        }
-        guard let path, FileManager.default.fileExists(atPath: path) else { return nil }
-        return URL(fileURLWithPath: path)
     }
 }

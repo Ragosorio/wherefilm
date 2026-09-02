@@ -107,7 +107,7 @@ válida de medir Core ML y el Neural Engine en hardware real.
 |---|---|
 | `scan <ruta> [--index]` | cataloga una carpeta o disco en su lugar |
 | `index [--full-speed] [--tasks …]` | procesa la cola de trabajos |
-| `search <frase> [--explain]` | busca; `--explain` muestra cómo se descompuso |
+| `search <frase> [--explain] [--benchmark-runs N]` | busca; puede explicar o medir p50/p95/p99 en proceso |
 | `status` | qué sabe el índice, y por qué el indexador está o no trabajando |
 | `volumes` | discos conocidos y si están conectados |
 | `doctor` | modelos, locales de voz, Apple Intelligence, aceleración SIMD |
@@ -376,13 +376,17 @@ que el indexador tenga prioridad mínima y se quite de en medio.
   editor está castigando.
 - Workers desechables: el modelo se carga, procesa un lote, y se libera.
 - El governor se consulta **antes de cada trabajo**: estado térmico, Low Power
-  Mode, batería, y si Resolve/Premiere/FCP están al frente.
+  Mode, batería, y si Resolve/Premiere/FCP están abiertos o al frente.
 - Con batería **sigue indexando** imágenes y texto, con la mitad de workers.
   Antes bajaba a solo-metadatos, y en una laptop eso significaba un índice que
   nunca llegaba a ser buscable: archivos contados, cero momentos, para siempre.
   La transcripción, que sí es cara, espera al enchufe; por debajo del 25% de
   carga se detiene todo menos lo casi gratis.
-- `Pause · 2h` en la barra de menús es real, y se reactiva solo.
+- Sin editor abierto, con corriente y temperatura normal, Smart acelera el
+  descubrimiento entre discos y deja que la cola precaliente la caché. Con un
+  editor abierto conserva metadatos, visual y OCR, pero deja transcripción y
+  hash completo para después.
+- `Pause · 2h` en la barra de menús es real para indexado y escaneo, y se reactiva solo.
 
 ---
 
@@ -411,7 +415,7 @@ cambiar la identidad de firma y añadir `notarytool`.
 
 Funciona de punta a punta, verificado en un MacBook Air M4 con material real:
 búsqueda visual en inglés y español, transcripción en español con timestamps,
-OCR, detección de archivos movidos y borrados, previews offline. 46 pruebas
+OCR, detección de archivos movidos y borrados, previews offline. 69 pruebas
 pasando.
 
 El bundle se verifica con un comando, simulando una Mac limpia — sin modelos
@@ -433,9 +437,10 @@ Deliberadamente no usa captura de pantalla ni las APIs de accesibilidad — una
 captura fotografía lo que haya en el monitor, que es una superficie de privacidad
 que una herramienta de búsqueda no tiene por qué abrir.
 
-Lo que sigue está en [`docs/PLAN.md`](docs/PLAN.md) §9 — sobre todo medir recall
-español contra inglés en un archivo real antes de decidir si vale la pena subir
-a SigLIP 2, y el indexado incremental con FSEvents.
+El benchmark versionado de español y el informe before/after viven en
+[`Benchmarks/spanish-search-v1.json`](Benchmarks/spanish-search-v1.json) y
+[`docs/PERFORMANCE-PASS-2026-09-02.md`](docs/PERFORMANCE-PASS-2026-09-02.md).
+El trabajo futuro general sigue en [`docs/PLAN.md`](docs/PLAN.md).
 
 ## La página
 
@@ -480,6 +485,7 @@ Los iconos y la tarjeta de Open Graph se derivan del icono maestro con
 - [`docs/PLAN.md`](docs/PLAN.md) — el plan completo: decisiones, fases, riesgos, costos
 - [`docs/decisions/`](docs/decisions/) — seis ADRs con el porqué de cada elección
 - [`docs/RESEARCH-NOTES.md`](docs/RESEARCH-NOTES.md) — de dónde salió todo esto
+- [`docs/PERFORMANCE-PASS-2026-09-02.md`](docs/PERFORMANCE-PASS-2026-09-02.md) — baseline, benchmark, calidad, recursos y límites del pase de velocidad
 
 ## Licencia y créditos
 

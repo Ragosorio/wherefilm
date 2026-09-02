@@ -168,6 +168,23 @@ public enum Schema {
             }
         }
 
+        // Coverage stats count distinct assets with OCR. Without this index the
+        // menu refresh would scan every OCR row in a large library.
+        migrator.registerMigration("v3-coverage-stats") { db in
+            try db.create(index: "idx_ocr_asset", on: "ocr_texts", columns: ["assetID"])
+        }
+
+        // FTS5's own term dictionary, exposed as a table. Stores nothing: it is
+        // a view over the index that already exists, and it is what lets the
+        // query planner ask "how many rows would this prefix touch?" before
+        // paying to find out the expensive way.
+        migrator.registerMigration("v4-search-vocab") { db in
+            try db.execute(sql: """
+                CREATE VIRTUAL TABLE IF NOT EXISTS search_vocab
+                USING fts5vocab('search_index', 'row')
+                """)
+        }
+
         return migrator
     }
 }

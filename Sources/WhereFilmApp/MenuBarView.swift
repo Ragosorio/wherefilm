@@ -63,17 +63,22 @@ struct MenuBarView: View {
     private var statusCard: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
-                stat(model.stats.assets, "archivos", icon: "photo.stack")
+                stat(model.stats.assets, "encontrados", icon: "photo.stack")
                 Divider().frame(height: 34)
-                stat(model.stats.moments, "momentos", icon: "sparkles.rectangle.stack")
+                stat(model.stats.searchableAssets, "buscables ahora", icon: "sparkles.rectangle.stack")
             }
 
-            if model.stats.pendingJobs > 0 {
+            if model.stats.assets > 0 {
+                Text("\(model.stats.visuallyUnderstoodAssets.formatted()) con comprensión visual · \(model.stats.transcribedAssets.formatted()) transcritos · \(model.stats.ocrEnrichedAssets.formatted()) con texto en pantalla")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            if model.stats.enrichingAssets > 0 {
                 HStack(spacing: 8) {
                     ProgressView().controlSize(.small)
-                    // One asset can have visual, OCR and transcription jobs.
-                    // Calling this a file made 151 files look like 152 files.
-                    Text("\(model.stats.pendingJobs.formatted()) tareas por completar")
+                    Text("WhereFilm está aprendiendo \(model.stats.enrichingAssets.formatted()) archivo(s)")
                         .font(.caption)
                 }
             }
@@ -191,6 +196,8 @@ struct MenuBarView: View {
         case .onBattery: "Con batería · buscando imágenes y texto"
         case .lowBattery: "Pausado · queda poca batería"
         case .editorInForeground: "Esperando mientras editas"
+        case .editorRunning: "Modo ligero · editor abierto"
+        case .searchActive: "Búsqueda con prioridad"
         }
     }
 

@@ -59,6 +59,15 @@ struct QueryPlanningTests {
         #expect(plan.visualPhrases.contains("man wearing a blue shirt"))
     }
 
+    @Test("Identifiers take the metadata fast path")
+    func identifiersSkipVisualEncoding() {
+        for identifier in ["4582", "IMG_0042", "A004C012", "TOMA 7", "ROLLO 2"] {
+            let plan = planner.lexiconPlan(identifier)
+            #expect(plan.visualPhrases.isEmpty)
+            #expect(!plan.literalTerms.isEmpty)
+        }
+    }
+
     /// A person searching their own footage types plurals. Hand-listing them in
     /// the table would double it and still leave gaps.
     @Test("Plurals are translated, not just dictionary singulars")
@@ -189,6 +198,91 @@ struct SearchEngineTests {
         }})
     }
 
+    @Test("Progressive search publishes FTS before visual refinement")
+    func progressiveSearchPublishesInOrder() async throws {
+        let (store, ids) = try seededStore()
+        let assetID = try #require(ids["BOTH.mov"])
+        let moment = try #require(try store.insertMoments([
+            Moment(assetID: assetID, startSeconds: 10, endSeconds: 20),
+        ]).first)
+        let momentID = try #require(moment.momentID)
+        var vector = [Float](repeating: 0, count: 512)
+        vector[0] = 1
+        try store.saveEmbeddings([(momentID, vector)], modelID: MobileCLIPVariant.s0.modelID)
+        try store.insertTranscript([
+            TranscriptChunk(assetID: assetID, startSeconds: 12, endSeconds: 18,
+                            text: "el problema fue el presupuesto"),
+        ])
+
+        let provider = ImmediateEmbeddingProvider(vector: vector)
+        let engine = SearchEngine(store: store, embeddingProvider: provider)
+        let plan = SearchPlan(rawQuery: "camisa azul presupuesto",
+                              visualPhrases: ["blue shirt"],
+                              spokenTerms: ["presupuesto"],
+                              literalTerms: ["presupuesto"],
+                              mediaType: nil, dateRange: nil, source: .lexicon)
+
+        var updates: [SearchUpdate] = []
+        for try await update in engine.searchProgressively(plan: plan, vectorIndex: nil) {
+            updates.append(update)
+        }
+
+        #expect(updates.count == 2)
+        #expect(updates.first?.phase == .fast)
+        #expect(updates.first?.isFinal == false)
+        #expect(updates.last?.phase == .refined)
+        #expect(updates.last?.isFinal == true)
+        #expect((updates.first?.results.isEmpty) == false)
+        #expect(updates.last?.results.first?.assetID == assetID)
+        #expect((updates.last?.elapsedMilliseconds ?? 0) >=
+                (updates.first?.elapsedMilliseconds ?? 0))
+    }
+
+    @Test("Cancelling a progressive search stops its refinement")
+    func progressiveSearchCancels() async throws {
+        let (store, _) = try seededStore()
+        let provider = DelayedEmbeddingProvider()
+        let engine = SearchEngine(store: store, embeddingProvider: provider)
+        let plan = SearchPlan(rawQuery: "blue shirt", visualPhrases: ["blue shirt"],
+                              spokenTerms: [], literalTerms: [],
+                              mediaType: nil, dateRange: nil, source: .literal)
+        let stream = engine.searchProgressively(plan: plan, vectorIndex: nil)
+
+        let consumer = Task {
+            do {
+                for try await _ in stream {}
+            } catch {
+                // Cancellation is the expected terminal state.
+            }
+        }
+        try await Task.sleep(for: .milliseconds(20))
+        consumer.cancel()
+        await consumer.value
+        try await Task.sleep(for: .milliseconds(20))
+
+        #expect(await provider.wasCancelled)
+    }
+
+    @Test("The refined ranking is deterministic")
+    func refinedRankingIsDeterministic() async throws {
+        let (store, ids) = try seededStore()
+        let assetID = try #require(ids["SPOKEN_ONLY.mov"])
+        try store.insertTranscript([
+            TranscriptChunk(assetID: assetID, startSeconds: 1, endSeconds: 2,
+                            text: "presupuesto aprobado"),
+        ])
+        let engine = SearchEngine(store: store)
+        let plan = SearchPlan(rawQuery: "presupuesto", visualPhrases: [],
+                              spokenTerms: ["presupuesto"], literalTerms: ["presupuesto"],
+                              mediaType: nil, dateRange: nil, source: .literal)
+
+        let first = try await engine.search(plan: plan, vectorIndex: nil)
+        let second = try await engine.search(plan: plan, vectorIndex: nil)
+        #expect(first.map(\.assetID) == second.map(\.assetID))
+        #expect(first.map(\.momentID) == second.map(\.momentID))
+        #expect(first.map(\.score) == second.map(\.score))
+    }
+
     @Test("Results carry their location and its availability")
     func resultsExplainWhereTheFileIs() async throws {
         let (store, ids) = try seededStore()
@@ -266,6 +360,61 @@ struct SearchEngineTests {
         #expect(SearchResult.timecode(74) == "01:14")
         #expect(SearchResult.timecode(852) == "14:12")
         #expect(SearchResult.timecode(3725) == "1:02:05")
+    }
+}
+
+private actor ImmediateEmbeddingProvider: QueryEmbeddingProviding {
+    let vector: [Float]
+    init(vector: [Float]) { self.vector = vector }
+
+    func embedding(for phrases: [String], variant: MobileCLIPVariant) async throws -> [Float] {
+        vector
+    }
+}
+
+private actor DelayedEmbeddingProvider: QueryEmbeddingProviding {
+    private(set) var wasCancelled = false
+
+    func embedding(for phrases: [String], variant: MobileCLIPVariant) async throws -> [Float] {
+        do {
+            try await Task.sleep(for: .seconds(5))
+            return [Float](repeating: 0, count: variant.dimensions)
+        } catch {
+            wasCancelled = true
+            throw error
+        }
+    }
+}
+
+@Suite("Query embedding cache")
+struct QueryEmbeddingCacheTests {
+    @Test("Model versions never share cached query vectors")
+    func modelVersionInvalidation() {
+        var cache = QueryVectorLRU(capacity: 2)
+        let old = QueryEmbeddingKey(modelID: "mobileclip-s0-v1", phrases: ["sunset"])
+        let new = QueryEmbeddingKey(modelID: "mobileclip-s0-v2", phrases: ["sunset"])
+
+        cache.insert([1], for: old)
+
+        #expect(cache.value(for: old) == [1])
+        #expect(cache.value(for: new) == nil)
+    }
+
+    @Test("Least-recently-used query vectors are evicted")
+    func leastRecentlyUsedEviction() {
+        var cache = QueryVectorLRU(capacity: 2)
+        let first = QueryEmbeddingKey(modelID: "model", phrases: ["first"])
+        let second = QueryEmbeddingKey(modelID: "model", phrases: ["second"])
+        let third = QueryEmbeddingKey(modelID: "model", phrases: ["third"])
+
+        cache.insert([1], for: first)
+        cache.insert([2], for: second)
+        _ = cache.value(for: first)
+        cache.insert([3], for: third)
+
+        #expect(cache.value(for: first) == [1])
+        #expect(cache.value(for: second) == nil)
+        #expect(cache.value(for: third) == [3])
     }
 }
 

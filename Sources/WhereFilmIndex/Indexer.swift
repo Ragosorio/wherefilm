@@ -54,6 +54,7 @@ public actor Indexer {
 
     private var imageEncoder: MobileCLIPImageEncoder?
     private var lastVisualWork = Date.distantPast
+    private var activeInteractiveSearches = 0
     /// Progress reporting has to be callable from the nonisolated workers, so it
     /// lives behind a small lock rather than in actor state.
     private let events = EventRelay()
@@ -82,6 +83,19 @@ public actor Indexer {
         governor.settings = settings
     }
 
+    /// Interactive reads always outrank background enrichment. In-flight work
+    /// is allowed to finish safely; no new wave starts until every overlapping
+    /// search has ended.
+    public func beginInteractiveSearch() {
+        activeInteractiveSearches += 1
+    }
+
+    public func endInteractiveSearch() {
+        activeInteractiveSearches = max(0, activeInteractiveSearches - 1)
+    }
+
+    var isInteractiveSearchActive: Bool { activeInteractiveSearches > 0 }
+
     // MARK: - Loop
 
     /// Runs until cancelled. Honours the governor between every single job, so
@@ -92,6 +106,14 @@ public actor Indexer {
         try? await vectorIndex.openForWriting()
 
         while !Task.isCancelled {
+            if activeInteractiveSearches > 0 {
+                emit(.throttled(.searchActive))
+                // Poll quickly: a typical search is far shorter than the normal
+                // five-second idle interval, and indexing should resume as soon
+                // as the user-visible work is done.
+                try? await Task.sleep(for: .milliseconds(50))
+                continue
+            }
             let decision = governor.decide()
             guard decision.isWorking else {
                 emit(.throttled(decision.reason))
@@ -390,15 +412,21 @@ public actor Indexer {
 
         var totals = CommitTotals(moments: moments.count, ocr: 0)
 
-        for (index, moment) in moments.enumerated() {
-            guard let momentID = moment.momentID else { continue }
+        if options.storeMomentPreviews {
             // The first frame becomes the asset's poster and is pinned: it has
             // to survive cache eviction so an offline drive still shows
-            // something. A failed thumbnail never fails the job.
-            if options.storeMomentPreviews {
-                _ = try? previews.store(frames[index].image, momentID: momentID,
-                                        assetID: assetID, pinned: pinFirst && index == 0)
+            // something. A failed thumbnail never fails the job. Persist all
+            // rows in one transaction after encoding the batch.
+            let pending = moments.enumerated().compactMap { index, moment in
+                moment.momentID.map {
+                    PreviewCache.PendingPreview(
+                        image: frames[index].image,
+                        momentID: $0,
+                        assetID: assetID,
+                        pinned: pinFirst && index == 0)
+                }
             }
+            _ = try? previews.store(pending)
         }
 
         // OCR runs on frames we already decoded. Doing it on all 30 frames per

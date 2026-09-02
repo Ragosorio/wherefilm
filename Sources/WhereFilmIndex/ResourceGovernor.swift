@@ -27,6 +27,8 @@ public enum ThrottleReason: String, Sendable {
     case onBattery
     case lowBattery
     case editorInForeground
+    case editorRunning
+    case searchActive
 
     public var label: String {
         switch self {
@@ -37,6 +39,8 @@ public enum ThrottleReason: String, Sendable {
         case .onBattery: "Light mode — on battery"
         case .lowBattery: "Paused — battery is low"
         case .editorInForeground: "Paused — you're editing"
+        case .editorRunning: "Light mode — an editor is open"
+        case .searchActive: "Paused — search has priority"
         }
     }
 }
@@ -44,9 +48,54 @@ public enum ThrottleReason: String, Sendable {
 public struct GovernorDecision: Sendable {
     public let allowedTasks: [JobTask]
     public let concurrency: Int
+    /// How many independent mounted-volume scans may run at once. Scanning one
+    /// volume remains serial to avoid seeking against itself; separate disks can
+    /// make progress together when the machine is otherwise idle.
+    public let scanConcurrency: Int
     public let reason: ThrottleReason
 
+    public init(allowedTasks: [JobTask], concurrency: Int,
+                scanConcurrency: Int = 1, reason: ThrottleReason) {
+        self.allowedTasks = allowedTasks
+        self.concurrency = concurrency
+        self.scanConcurrency = scanConcurrency
+        self.reason = reason
+    }
+
     public var isWorking: Bool { !allowedTasks.isEmpty }
+}
+
+/// A testable snapshot of the signals that drive Smart mode. The live provider
+/// is intentionally kept in `ResourceGovernor`, while tests can describe a Mac
+/// with an editor open or a battery without depending on the host running them.
+public struct ResourceSnapshot: Sendable, Equatable {
+    public enum ThermalLevel: String, Sendable {
+        case nominal
+        case fair
+        case serious
+        case critical
+    }
+
+    public var thermalLevel: ThermalLevel
+    public var isLowPowerModeEnabled: Bool
+    public var onACPower: Bool
+    public var batteryCharge: Double?
+    public var frontmostBundleIdentifier: String?
+    public var runningBundleIdentifiers: Set<String>
+
+    public init(thermalLevel: ThermalLevel = .nominal,
+                isLowPowerModeEnabled: Bool = false,
+                onACPower: Bool = true,
+                batteryCharge: Double? = nil,
+                frontmostBundleIdentifier: String? = nil,
+                runningBundleIdentifiers: Set<String> = []) {
+        self.thermalLevel = thermalLevel
+        self.isLowPowerModeEnabled = isLowPowerModeEnabled
+        self.onACPower = onACPower
+        self.batteryCharge = batteryCharge
+        self.frontmostBundleIdentifier = frontmostBundleIdentifier
+        self.runningBundleIdentifiers = runningBundleIdentifiers
+    }
 }
 
 /// Decides, moment to moment, whether the indexer may work and how hard.
@@ -60,7 +109,8 @@ public struct ResourceGovernor: Sendable {
         public var mode: IndexerMode = .smart
         /// Set by "Pause for 2h" in the menu bar.
         public var pausedUntil: Date?
-        /// In Smart mode, back off when one of these is frontmost.
+        /// In Smart mode, back off when one of these is running, and yield all
+        /// expensive work when one is frontmost.
         public var editorBundleIDs: Set<String> = [
             "com.blackmagic-design.DaVinciResolve",
             "com.adobe.PremierePro",
@@ -101,63 +151,90 @@ public struct ResourceGovernor: Sendable {
     }
 
     public var settings: Settings
+    private let snapshotOverride: ResourceSnapshot?
 
-    public init(settings: Settings = Settings()) {
+    public init(settings: Settings = Settings(), snapshot: ResourceSnapshot? = nil) {
         self.settings = settings
+        self.snapshotOverride = snapshot
     }
 
     public func decide(now: Date = Date()) -> GovernorDecision {
+        let snapshot = snapshotOverride ?? Self.liveSnapshot()
         if let until = settings.pausedUntil, until > now {
-            return GovernorDecision(allowedTasks: [], concurrency: 0, reason: .userPaused)
+            return GovernorDecision(allowedTasks: [], concurrency: 0,
+                                    scanConcurrency: 0, reason: .userPaused)
         }
 
         switch settings.mode {
         case .paused:
-            return GovernorDecision(allowedTasks: [], concurrency: 0, reason: .userPaused)
+            return GovernorDecision(allowedTasks: [], concurrency: 0,
+                                    scanConcurrency: 0, reason: .userPaused)
         case .fullSpeed:
             // The user explicitly asked for everything. Still respect a critical
             // thermal state — that is the machine protecting itself, not a
             // preference.
-            if ProcessInfo.processInfo.thermalState == .critical {
-                return GovernorDecision(allowedTasks: [], concurrency: 0, reason: .thermal)
+            if snapshot.thermalLevel == .critical {
+                return GovernorDecision(allowedTasks: [], concurrency: 0,
+                                        scanConcurrency: 0, reason: .thermal)
             }
             // "Full speed" means *every task type*, not an unbounded number of
             // workers: the pool above is already the safe ceiling.
             return GovernorDecision(allowedTasks: JobTask.allCases,
                                     concurrency: max(1, settings.maxConcurrency),
+                                    scanConcurrency: scanWidth,
                                     reason: .none)
         case .smart:
-            return smartDecision()
+            return smartDecision(snapshot: snapshot)
         }
     }
 
-    private func smartDecision() -> GovernorDecision {
-        let info = ProcessInfo.processInfo
-
-        switch info.thermalState {
+    private func smartDecision(snapshot: ResourceSnapshot) -> GovernorDecision {
+        switch snapshot.thermalLevel {
         case .critical:
-            return GovernorDecision(allowedTasks: [], concurrency: 0, reason: .thermal)
+            return GovernorDecision(allowedTasks: [], concurrency: 0,
+                                    scanConcurrency: 0, reason: .thermal)
         case .serious:
             // Still make progress on the near-free work, but only one at a time.
-            return GovernorDecision(allowedTasks: [.metadata], concurrency: 1, reason: .thermal)
+            return GovernorDecision(allowedTasks: [.metadata], concurrency: 1,
+                                    scanConcurrency: 1, reason: .thermal)
         default:
             break
         }
 
-        if info.isLowPowerModeEnabled {
-            return GovernorDecision(allowedTasks: [.metadata], concurrency: 1, reason: .lowPower)
+        if snapshot.isLowPowerModeEnabled {
+            // Keep visual/OCR discovery alive at one worker. Delaying these
+            // forever makes the catalog technically present but not useful.
+            return GovernorDecision(allowedTasks: [.metadata, .visual, .ocr],
+                                    concurrency: 1, scanConcurrency: 1,
+                                    reason: .lowPower)
         }
 
-        if isEditorFrontmost() {
-            return GovernorDecision(allowedTasks: [], concurrency: 0, reason: .editorInForeground)
+        let editorIsFrontmost = settings.editorBundleIDs.contains(
+            snapshot.frontmostBundleIdentifier ?? "")
+        let editorIsRunning = !snapshot.runningBundleIdentifiers
+            .intersection(settings.editorBundleIDs).isEmpty
+
+        if editorIsFrontmost {
+            // Directory discovery and metadata are cheap and preserve move/name
+            // accuracy. Heavy analysis waits until the editor yields the machine.
+            return GovernorDecision(allowedTasks: [.metadata], concurrency: 1,
+                                    scanConcurrency: 1, reason: .editorInForeground)
         }
 
-        if !isOnACPower() {
+        if editorIsRunning {
+            // Keep the library becoming semantically searchable, but defer the
+            // two broadest consumers: speech decoding and full-file hashing.
+            return GovernorDecision(allowedTasks: [.metadata, .visual, .ocr],
+                                    concurrency: 1, scanConcurrency: 1,
+                                    reason: .editorRunning)
+        }
+
+        if !snapshot.onACPower {
             // Genuinely low: leave the remaining charge to the person using the
             // Mac.
-            if let charge = batteryCharge(), charge < settings.batteryFloor {
-                return GovernorDecision(allowedTasks: [.metadata], concurrency: 1,
-                                        reason: .lowBattery)
+            if let charge = snapshot.batteryCharge, charge < settings.batteryFloor {
+                return GovernorDecision(allowedTasks: [.metadata, .visual], concurrency: 1,
+                                        scanConcurrency: 1, reason: .lowBattery)
             }
             // Otherwise keep making the library searchable. Visual + OCR are
             // what turn files into findable moments; transcription and the
@@ -165,60 +242,92 @@ public struct ResourceGovernor: Sendable {
             // for a power outlet.
             return GovernorDecision(allowedTasks: [.metadata, .visual, .ocr],
                                     concurrency: max(1, settings.maxConcurrency / 2),
+                                    scanConcurrency: 1,
                                     reason: .onBattery)
         }
 
         return GovernorDecision(
             allowedTasks: [.metadata, .visual, .ocr, .transcribe, .strongHash],
             concurrency: max(1, settings.maxConcurrency),
+            scanConcurrency: scanWidth,
             reason: .none)
+    }
+
+    private var scanWidth: Int {
+        min(4, max(1, settings.maxConcurrency / 2))
     }
 
     /// When Resolve is in front the user wants every cycle for the timeline.
     public func isEditorFrontmost() -> Bool {
-        guard let bundleID = NSWorkspace.shared.frontmostApplication?.bundleIdentifier else {
-            return false
-        }
-        return settings.editorBundleIDs.contains(bundleID)
+        let snapshot = snapshotOverride ?? Self.liveSnapshot()
+        return settings.editorBundleIDs.contains(snapshot.frontmostBundleIdentifier ?? "")
+    }
+
+    /// True when an editor is open even if another app currently has focus.
+    public func isEditorRunning() -> Bool {
+        let snapshot = snapshotOverride ?? Self.liveSnapshot()
+        return !snapshot.runningBundleIdentifiers
+            .intersection(settings.editorBundleIDs).isEmpty
     }
 
     public func isOnACPower() -> Bool {
-        guard let snapshot = IOPSCopyPowerSourcesInfo()?.takeRetainedValue(),
-              let sources = IOPSCopyPowerSourcesList(snapshot)?.takeRetainedValue() as? [CFTypeRef]
-        else { return true }
-
-        // A desktop with no battery reports no sources at all — treat that as
-        // plugged in, because it is.
-        if sources.isEmpty { return true }
-
-        for source in sources {
-            guard let description = IOPSGetPowerSourceDescription(snapshot, source)?
-                .takeUnretainedValue() as? [String: Any] else { continue }
-            if let state = description[kIOPSPowerSourceStateKey] as? String {
-                return state == kIOPSACPowerValue
-            }
-        }
-        return true
+        (snapshotOverride ?? Self.liveSnapshot()).onACPower
     }
 
     /// Fraction of a full charge, or nil on a machine with no battery.
     public func batteryCharge() -> Double? {
-        guard let snapshot = IOPSCopyPowerSourcesInfo()?.takeRetainedValue(),
-              let sources = IOPSCopyPowerSourcesList(snapshot)?.takeRetainedValue() as? [CFTypeRef]
-        else { return nil }
+        (snapshotOverride ?? Self.liveSnapshot()).batteryCharge
+    }
 
+    private static func liveSnapshot() -> ResourceSnapshot {
+        let info = ProcessInfo.processInfo
+        let thermal: ResourceSnapshot.ThermalLevel
+        switch info.thermalState {
+        case .nominal: thermal = .nominal
+        case .fair: thermal = .fair
+        case .serious: thermal = .serious
+        case .critical: thermal = .critical
+        @unknown default: thermal = .serious
+        }
+
+        let power = livePowerState()
+        return ResourceSnapshot(
+            thermalLevel: thermal,
+            isLowPowerModeEnabled: info.isLowPowerModeEnabled,
+            onACPower: power.onACPower,
+            batteryCharge: power.batteryCharge,
+            frontmostBundleIdentifier: NSWorkspace.shared.frontmostApplication?.bundleIdentifier,
+            runningBundleIdentifiers: Set(NSWorkspace.shared.runningApplications
+                .compactMap(\.bundleIdentifier)))
+    }
+
+    private static func livePowerState() -> (onACPower: Bool, batteryCharge: Double?) {
+        guard let info = IOPSCopyPowerSourcesInfo()?.takeRetainedValue(),
+              let sources = IOPSCopyPowerSourcesList(info)?.takeRetainedValue() as? [CFTypeRef]
+        else { return (true, nil) }
+
+        // A desktop with no battery reports no sources at all — treat that as
+        // plugged in, because it is.
+        if sources.isEmpty { return (true, nil) }
+
+        var onACPower = true
+        var charge: Double?
         for source in sources {
-            guard let description = IOPSGetPowerSourceDescription(snapshot, source)?
+            guard let description = IOPSGetPowerSourceDescription(info, source)?
                 .takeUnretainedValue() as? [String: Any] else { continue }
+            if let state = description[kIOPSPowerSourceStateKey] as? String {
+                onACPower = state == kIOPSACPowerValue
+            }
             // IOKit commonly bridges these values as NSNumber/Int rather than
             // Double. Casting straight to Double made the low-battery guard a
             // no-op on real Macs even though it looked correct in tests.
-            guard let current = (description[kIOPSCurrentCapacityKey] as? NSNumber)?.doubleValue,
-                  let maximum = (description[kIOPSMaxCapacityKey] as? NSNumber)?.doubleValue,
-                  maximum > 0 else { continue }
-            return current / maximum
+            if let current = (description[kIOPSCurrentCapacityKey] as? NSNumber)?.doubleValue,
+               let maximum = (description[kIOPSMaxCapacityKey] as? NSNumber)?.doubleValue,
+               maximum > 0 {
+                charge = current / maximum
+            }
         }
-        return nil
+        return (onACPower, charge)
     }
 
     public var thermalStateDescription: String {

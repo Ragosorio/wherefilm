@@ -1,0 +1,89 @@
+{
+  "name": "WhereFilm Spanish search fixture v1",
+  "cases": [
+    {
+      "id": "sunset-neutral",
+      "category": "neutral Spanish",
+      "cluster": "sunset",
+      "query": "atardecer frente al mar",
+      "expectedAssets": ["SUNSET_0005.heic"]
+    },
+    {
+      "id": "sunset-synonym",
+      "category": "neutral Spanish",
+      "cluster": "sunset",
+      "query": "puesta de sol sobre el oceano",
+      "expectedAssets": ["SUNSET_0005.heic"]
+    },
+    {
+      "id": "sunset-english",
+      "category": "English",
+      "cluster": "sunset",
+      "query": "golden sunset beach",
+      "expectedAssets": ["SUNSET_0005.heic"]
+    },
+    {
+      "id": "sunset-no-accent",
+      "category": "missing accents",
+      "cluster": "sunset",
+      "query": "cielo anaranjado al final del dia",
+      "expectedAssets": ["SUNSET_0005.heic"]
+    },
+    {
+      "id": "sunset-colloquial",
+      "category": "colloquial Spanish",
+      "cluster": "sunset",
+      "query": "el sol cayendo en el horizonte",
+      "expectedAssets": ["SUNSET_0005.heic"]
+    },
+    {
+      "id": "cliffs-english",
+      "category": "English",
+      "cluster": "cliffs",
+      "query": "rocky cliffs by the ocean",
+      "expectedAssets": ["CLIFFS_0004.heic"]
+    },
+    {
+      "id": "road-spanish",
+      "category": "neutral Spanish",
+      "cluster": "road",
+      "query": "camino recto en el desierto",
+      "expectedAssets": ["ROAD_0006.heic"]
+    },
+    {
+      "id": "road-english",
+      "category": "English",
+      "cluster": "road",
+      "query": "road through desert",
+      "expectedAssets": ["ROAD_0006.heic"]
+    },
+    {
+      "id": "speech-spanish",
+      "category": "neutral Spanish",
+      "cluster": "budget-interview",
+      "query": "entrevista sobre el presupuesto",
+      "expectedAssets": ["INTERVIEW_JUAN_03.mov"]
+    },
+    {
+      "id": "speech-code-switch",
+      "category": "English Spanish mixed",
+      "cluster": "budget-interview",
+      "query": "budget interview",
+      "expectedAssets": ["INTERVIEW_JUAN_03.mov"]
+    },
+    {
+      "id": "cliffs-spanish",
+      "category": "neutral Spanish",
+      "cluster": "cliffs",
+      "query": "acantilados junto al mar",
+      "expectedAssets": ["CLIFFS_0004.heic"]
+    },
+    {
+      "id": "cliffs-no-accent",
+      "category": "missing accents",
+      "cluster": "cliffs",
+      "query": "acantilado al lado del oceano",
+      "expectedAssets": ["CLIFFS_0004.heic"]
+    }
+  ]
+}

@@ -1,5 +1,6 @@
 import Testing
 import Foundation
+import GRDB
 @testable import WhereFilmCore
 
 @Suite("Index store")
@@ -11,6 +12,34 @@ struct StoreTests {
         let asset = try store.insert(Asset(
             contentKey: key, mediaType: .video, durationSeconds: 120, displayName: name))
         return try #require(asset.assetID)
+    }
+
+    @Test("Stats distinguish discovered, searchable and enriched assets")
+    func progressiveCoverageStats() throws {
+        let store = try makeStore()
+        let firstID = try seedAsset(store, key: "stats:first", name: "FIRST.mov")
+        let secondID = try seedAsset(store, key: "stats:second", name: "SECOND.mov")
+
+        try store.addLevels(.metadata, to: firstID)
+        try store.addLevels([.metadata, .visual, .spoken], to: secondID)
+        let moment = try #require(try store.insertMoments([
+            Moment(assetID: secondID, startSeconds: 0, endSeconds: 1),
+        ]).first)
+        let momentID = try #require(moment.momentID)
+        try store.insertOCR([
+            OCRText(momentID: momentID, assetID: secondID,
+                    text: "CLAQUETA 12", confidence: 0.9),
+        ], momentTimes: [momentID: (0, 1)])
+        try store.enqueue(assetID: firstID, tasks: [.visual, .ocr])
+        try store.enqueue(assetID: secondID, tasks: [.strongHash])
+
+        let stats = try store.stats()
+        #expect(stats.assets == 2)
+        #expect(stats.searchableAssets == 2)
+        #expect(stats.visuallyUnderstoodAssets == 1)
+        #expect(stats.transcribedAssets == 1)
+        #expect(stats.ocrEnrichedAssets == 1)
+        #expect(stats.enrichingAssets == 2, "count assets, not their three queued jobs")
     }
 
     @Test("Unplugging a drive marks files offline, never missing")
@@ -105,6 +134,60 @@ struct StoreTests {
         #expect(marked == 1)
         #expect(try store.locations(assetID: inScope)[0].availability == .missing)
         #expect(try store.locations(assetID: outOfScope)[0].availability == .online)
+    }
+
+    @Test("A folder prefix never matches a sibling folder")
+    func markMissingRespectsDirectoryBoundary() throws {
+        let store = try makeStore()
+        try store.upsertVolume(Volume(volumeUUID: "V", name: "Drive"))
+        let scoped = try seedAsset(store, key: "q1:scoped", name: "scoped.mov")
+        let sibling = try seedAsset(store, key: "q1:sibling", name: "sibling.mov")
+        try store.upsertLocation(Location(assetID: scoped, volumeUUID: "V",
+                                          relativePath: "Media/scoped.mov", fileSize: 1))
+        try store.upsertLocation(Location(assetID: sibling, volumeUUID: "V",
+                                          relativePath: "Media2/sibling.mov", fileSize: 1))
+
+        let marked = try store.markMissing(volumeUUID: "V", pathPrefix: "Media",
+                                           seenPaths: [])
+        #expect(marked == 1)
+        #expect(try store.locations(assetID: scoped)[0].availability == .missing)
+        #expect(try store.locations(assetID: sibling)[0].availability == .online)
+    }
+
+    @Test("Nearest preview lookup keeps separate moments for one asset")
+    func nearestPreviewsKeepSeparateTargets() throws {
+        let store = try makeStore()
+        let assetID = try seedAsset(store, key: "preview:targets")
+        let moments = try store.insertMoments([
+            Moment(assetID: assetID, startSeconds: 0, endSeconds: 10),
+            Moment(assetID: assetID, startSeconds: 100, endSeconds: 110),
+        ])
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("wf-preview-targets-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let paths = try moments.enumerated().map { index, moment -> (Int64, String) in
+            let momentID = try #require(moment.momentID)
+            let path = directory.appendingPathComponent("frame-\(index).jpg").path
+            try Data("jpeg-\(index)".utf8).write(to: URL(fileURLWithPath: path))
+            return (momentID, path)
+        }
+        try store.dbPool.write { db in
+            for (momentID, path) in paths {
+                try db.execute(sql: """
+                    INSERT INTO previews (momentID, cachePath, bytes, lastUsedAt, pinned)
+                    VALUES (?, ?, 1, ?, 0)
+                    """, arguments: [momentID, path, Date()])
+            }
+        }
+
+        let found = try store.nearestPreviewPaths(targets: [
+            (assetID: assetID, seconds: 2),
+            (assetID: assetID, seconds: 98),
+        ])
+        #expect(found[0] == paths[0].1)
+        #expect(found[1] == paths[1].1)
     }
 
     @Test("The same footage on three drives is one asset with three locations")
@@ -257,6 +340,116 @@ struct StoreTests {
 
         try store.deleteMoments(assetID: assetID)
         #expect(try store.textSearch(pattern: "\"member\"*", kinds: [.ocr]).isEmpty)
+    }
+
+    @Test("A library whose derived rows lost their moments can still be opened")
+    func orphanedDerivedRowsDoNotBlockMigration() throws {
+        // Taken from a real index, not invented: 151 assets, zero moments, and
+        // 262 preview rows still pointing at moments that had gone. SQLite
+        // verifies deferred foreign keys when a migration commits, so every
+        // migration after the first one failed and the app could not open its
+        // own database at all.
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("wherefilm-orphans-\(UUID().uuidString).sqlite")
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let assetID: Int64
+        let momentID: Int64
+        do {
+            let store = try IndexStore(url: url)
+            assetID = try seedAsset(store, key: "orphan:1", name: "ORPHAN.mov")
+            let moment = try #require(try store.insertMoments([
+                Moment(assetID: assetID, startSeconds: 0, endSeconds: 4),
+            ]).first)
+            momentID = try #require(moment.momentID)
+            try store.insertOCR(
+                [OCRText(momentID: momentID, assetID: assetID, text: "CLAQUETA 3",
+                         confidence: 0.9)],
+                momentTimes: [momentID: (0, 4)])
+
+            // Orphan the derived rows the way the damaged library was orphaned:
+            // the moment disappears while its children survive.
+            try store.dbPool.writeWithoutTransaction { db in
+                try db.execute(sql: "PRAGMA foreign_keys = OFF")
+                try db.execute(sql: """
+                    INSERT INTO previews (momentID, cachePath, bytes, lastUsedAt, pinned)
+                    VALUES (?, '/tmp/nowhere.jpg', 1, ?, 0)
+                    """, arguments: [momentID, Date()])
+                try db.execute(sql: """
+                    INSERT INTO search_index
+                        (text, assetID, momentID, kind, startSeconds, endSeconds)
+                    VALUES ('staleorphan', ?, 999999999, 'ocr', 0, 1)
+                    """, arguments: [assetID])
+                try db.execute(sql: "DELETE FROM moments WHERE momentID = ?",
+                               arguments: [momentID])
+                // Wind the schema back to exactly where the damaged library was
+                // stuck: everything `v1` created, and nothing after it.
+                try db.execute(sql: "DROP TABLE IF EXISTS analysis_state")
+                try db.execute(sql: "DROP TABLE IF EXISTS search_vocab")
+                try db.execute(sql: "DROP INDEX IF EXISTS idx_ocr_asset")
+                try db.execute(sql: "DELETE FROM grdb_migrations WHERE identifier <> 'v1'")
+                try db.execute(sql: "PRAGMA foreign_keys = ON")
+            }
+        }
+
+        // Reopening must succeed, run every migration, and leave the asset —
+        // which was never the damaged part — completely intact.
+        let reopened = try IndexStore(url: url)
+        let stats = try reopened.stats()
+        #expect(stats.assets == 1)
+        #expect(try reopened.asset(id: assetID)?.displayName == "ORPHAN.mov")
+
+        let violations = try reopened.dbPool.read { db in
+            try Int.fetchOne(db, sql: "SELECT count(*) FROM pragma_foreign_key_check") ?? 0
+        }
+        #expect(violations == 0, "the repair must leave no dangling references behind")
+        #expect(try reopened.textSearch(pattern: "\"staleorphan\"").isEmpty,
+                "FTS payloads are not protected by SQLite foreign keys")
+    }
+
+    @Test("One grouped text search returns what separate per-kind searches would")
+    func groupedTextSearchMatchesSeparateSearches() throws {
+        let store = try makeStore()
+        let assetID = try seedAsset(store, key: "grouped:1", name: "PRESUPUESTO_01.mov")
+        try store.indexMetadataText(assetID: assetID, filename: "PRESUPUESTO_01.mov",
+                                    folder: "CLIENTE_A", camera: nil)
+        try store.insertTranscript((0..<40).map { index in
+            TranscriptChunk(assetID: assetID, startSeconds: Double(index) * 10,
+                            endSeconds: Double(index) * 10 + 10,
+                            text: "hablamos del presupuesto numero \(index)")
+        })
+
+        let pattern = "\"presupuesto\"*"
+        let grouped = try store.textSearch(
+            pattern: pattern,
+            groups: [[.transcript], [.filename, .folder, .metadata, .note]],
+            limitPerGroup: 5)
+        let transcripts = try store.textSearch(pattern: pattern, kinds: [.transcript], limit: 5)
+        let metadata = try store.textSearch(
+            pattern: pattern, kinds: [.filename, .folder, .metadata, .note], limit: 5)
+
+        #expect(grouped[0].map(\.text) == transcripts.map(\.text))
+        #expect(grouped[1].map(\.text) == metadata.map(\.text))
+        // The metadata group is starved by the transcript rows in the wide scan,
+        // so this also exercises the top-up path.
+        #expect(!grouped[1].isEmpty)
+    }
+
+    @Test("The index reports how broad a prefix would be before searching on it")
+    func prefixBreadthReflectsTheVocabulary() throws {
+        let store = try makeStore()
+        let assetID = try seedAsset(store, key: "breadth:1", name: "B.mov")
+        try store.insertTranscript((0..<50).map { index in
+            TranscriptChunk(assetID: assetID, startSeconds: Double(index),
+                            endSeconds: Double(index) + 1,
+                            text: index < 45 ? "manera de trabajar" : "mano derecha")
+        })
+
+        // "man" reaches every row through *manera* and *mano*; "manera" reaches
+        // only its own. That gap is the whole point of asking before searching.
+        #expect(try store.prefixBreadth("man") == 50)
+        #expect(try store.prefixBreadth("manera") == 45)
+        #expect(try store.prefixBreadth("zzz") == 0)
     }
 
     @Test("Embeddings round-trip through the database")

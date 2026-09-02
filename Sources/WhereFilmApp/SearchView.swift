@@ -43,6 +43,9 @@ struct SearchView: View {
                 queryFocused = true
             }
         }
+        .onChange(of: model.query) { _, _ in
+            model.scheduleSearch()
+        }
         .sheet(item: $selected) { result in
             MomentPlayer(result: result) { selected = nil }
                 .preferredColorScheme(.dark)
@@ -136,9 +139,13 @@ struct SearchView: View {
                     .focused($queryFocused)
                     .onSubmit { Task { await model.runSearch() } }
 
-                if model.isSearching {
+                // Nothing animated for the common sub-300 ms path. If a cold
+                // model genuinely takes longer, the delayed indicator appears
+                // without clearing the previous results.
+                if model.isSearchTakingLong {
                     ProgressView().controlSize(.small)
-                } else if !model.query.isEmpty {
+                }
+                if !model.query.isEmpty {
                     Button {
                         model.query = ""
                         model.results = []
@@ -194,8 +201,8 @@ struct SearchView: View {
 
                 Spacer()
 
-                if model.currentActivity != nil {
-                    Label("Organizando en segundo plano", systemImage: "sparkles")
+                if model.stats.enrichingAssets > 0 {
+                    Label("\(model.stats.searchableAssets.formatted()) buscables · \(model.stats.enrichingAssets.formatted()) aprendiendo", systemImage: "sparkles")
                         .font(.caption)
                         .foregroundStyle(WhereFilmBrand.vapor.opacity(0.72))
                 }
@@ -221,7 +228,7 @@ struct SearchView: View {
                 HStack {
                     Text("\(model.results.count) momentos")
                         .font(.headline)
-                    Text("ordenados por relevancia")
+                    Text(model.isSearching ? "refinando sin interrumpirte" : "ordenados por relevancia")
                         .foregroundStyle(.secondary)
                     Spacer()
                     Text("Haz clic para abrir justo ahí")
@@ -277,9 +284,11 @@ struct SearchView: View {
             .padding(.horizontal, 44)
         } else if model.query.isEmpty {
             VStack(spacing: 18) {
-                Text("\(model.stats.moments.formatted()) momentos listos para encontrar")
+                Text("\(model.stats.searchableAssets.formatted()) archivos ya se pueden buscar")
                     .font(.title3.weight(.semibold))
-                Text("Prueba una búsqueda")
+                Text(model.stats.enrichingAssets > 0
+                     ? "WhereFilm sigue entendiendo \(model.stats.enrichingAssets.formatted()) en segundo plano."
+                     : "Prueba una búsqueda")
                     .foregroundStyle(.secondary)
                 HStack(spacing: 10) {
                     suggestion("atardecer frente al mar")
@@ -292,13 +301,17 @@ struct SearchView: View {
             VStack(spacing: 12) {
                 Image(systemName: "sparkles.rectangle.stack")
                     .font(.system(size: 34, weight: .light))
-                Text("No encontramos una coincidencia clara")
+                Text(model.isSearching
+                     ? "Buscando lo que describiste…"
+                     : "No encontramos una coincidencia clara")
                     .font(.title3.weight(.semibold))
-                Text(model.precision == .broad
-                     ? "Prueba con menos detalles o con una frase distinta."
-                     : "Cambia el alcance a Amplia para explorar coincidencias aproximadas.")
-                    .foregroundStyle(.secondary)
-                if model.precision != .broad {
+                if !model.isSearching {
+                    Text(model.precision == .broad
+                         ? "Prueba con menos detalles o con una frase distinta."
+                         : "Cambia el alcance a Amplia para explorar coincidencias aproximadas.")
+                        .foregroundStyle(.secondary)
+                }
+                if !model.isSearching, model.precision != .broad {
                     Button("Buscar de forma más amplia") {
                         model.precision = .broad
                         Task { await model.runSearch() }

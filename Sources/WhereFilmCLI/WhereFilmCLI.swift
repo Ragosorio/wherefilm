@@ -21,7 +21,8 @@ struct WhereFilm: AsyncParsableCommand {
             """,
         version: "0.1.0",
         subcommands: [Scan.self, Index.self, Search.self, Status.self,
-                      Volumes.self, Doctor.self, Rebuild.self, Tokenize.self],
+                      Volumes.self, Doctor.self, Rebuild.self, Tokenize.self,
+                      BenchmarkFixture.self],
         defaultSubcommand: Status.self)
 }
 
@@ -237,6 +238,12 @@ struct Search: AsyncParsableCommand {
     @Option(name: .long, help: "Cosine similarity treated as a perfect visual match.")
     var strongVisual: Float?
 
+    @Option(name: .long, help: "How many candidates each channel retrieves before fusion.")
+    var channelDepth: Int?
+
+    @Option(name: .long, help: "Repeat the same query in-process and report p50/p95/p99 latency.")
+    var benchmarkRuns = 1
+
     func run() async throws {
         let store = try storeOptions.makeStore()
         guard let variant = MobileCLIPVariant(rawValue: model) else {
@@ -244,7 +251,9 @@ struct Search: AsyncParsableCommand {
         }
         let text = query.joined(separator: " ")
         guard !text.isEmpty else { throw ValidationError("Say what you're looking for.") }
+        guard benchmarkRuns > 0 else { throw ValidationError("--benchmark-runs must be greater than zero.") }
 
+        let totalStarted = Date()
         let planner = QueryPlanner(useFoundationModel: !noLLM)
         let plan = await planner.plan(text)
 
@@ -262,21 +271,60 @@ struct Search: AsyncParsableCommand {
         var options = SearchEngine.Options()
         options.limit = limit
         options.variant = variant
+        if let channelDepth { options.channelDepth = channelDepth }
         if let minVisual { options.weights.minimumVisualSimilarity = minVisual }
         if let strongVisual { options.weights.strongVisualSimilarity = strongVisual }
 
         let engine = SearchEngine(store: store, options: options)
-        let started = Date()
-        let results = try await engine.search(plan: plan, vectorIndex: vectorIndex)
-        let elapsed = Date().timeIntervalSince(started)
+        var results: [SearchResult] = []
+        var firstUsefulSamples: [Double] = []
+        var stableSamples: [Double] = []
+        var searchTotalSamples: [Double] = []
+        var lastTimings = SearchTimings()
+
+        for _ in 0..<benchmarkRuns {
+            let searchStarted = Date()
+            var firstUsefulMilliseconds: Double?
+            var stableMilliseconds = 0.0
+            var lastUpdateTimings = SearchTimings()
+            for try await update in engine.searchProgressively(plan: plan, vectorIndex: vectorIndex) {
+                if firstUsefulMilliseconds == nil, !update.results.isEmpty {
+                    firstUsefulMilliseconds = update.elapsedMilliseconds
+                }
+                results = update.results
+                lastUpdateTimings = update.timings
+                if update.isFinal { stableMilliseconds = update.elapsedMilliseconds }
+            }
+            lastTimings = lastUpdateTimings
+            firstUsefulSamples.append(firstUsefulMilliseconds ?? stableMilliseconds)
+            stableSamples.append(stableMilliseconds)
+            searchTotalSamples.append(Date().timeIntervalSince(searchStarted) * 1_000)
+        }
+        let totalMilliseconds = Date().timeIntervalSince(totalStarted) * 1_000
+
+        if benchmarkRuns > 1 {
+            let warmFirstUseful = Array(firstUsefulSamples.dropFirst())
+            let warmStable = Array(stableSamples.dropFirst())
+            let warmSearchTotal = Array(searchTotalSamples.dropFirst())
+            print("Benchmark (1 cold + \(benchmarkRuns - 1) warm in-process runs)")
+            print("  cold          first useful \(format(firstUsefulSamples[0])) ms · stable \(format(stableSamples[0])) ms · total \(format(searchTotalSamples[0])) ms")
+            printLatency("warm useful", warmFirstUseful)
+            printLatency("warm stable", warmStable)
+            printLatency("warm total", warmSearchTotal)
+            print("  stages       \(lastTimings.summary)")
+            print("")
+        }
+
+        let firstUsefulMilliseconds = firstUsefulSamples.last ?? 0
+        let stableMilliseconds = stableSamples.last ?? 0
 
         guard !results.isEmpty else {
             print("No moments found.")
-            print("(\(String(format: "%.0f", elapsed * 1000)) ms)")
+            print("(stable \(String(format: "%.1f", stableMilliseconds)) ms · total \(String(format: "%.1f", totalMilliseconds)) ms)")
             return
         }
 
-        print("Found \(results.count) moment\(results.count == 1 ? "" : "s") in \(String(format: "%.0f", elapsed * 1000)) ms\n")
+        print("Found \(results.count) moment\(results.count == 1 ? "" : "s") · first useful \(String(format: "%.1f", firstUsefulMilliseconds)) ms · stable \(String(format: "%.1f", stableMilliseconds)) ms · command total \(String(format: "%.1f", totalMilliseconds)) ms\n")
         for (rank, result) in results.enumerated() {
             let percent = Int((result.score * 100).rounded())
             print("\(rank + 1). \(result.displayName)  \(result.timeRange)   \(percent)%")
@@ -292,6 +340,24 @@ struct Search: AsyncParsableCommand {
             }
             print("")
         }
+    }
+
+    private func printLatency(_ label: String, _ samples: [Double]) {
+        print("  \(label.padding(toLength: 13, withPad: " ", startingAt: 0)) p50 \(format(percentile(0.50, samples))) ms · p95 \(format(percentile(0.95, samples))) ms · p99 \(format(percentile(0.99, samples))) ms")
+    }
+
+    private func percentile(_ fraction: Double, _ samples: [Double]) -> Double {
+        guard !samples.isEmpty else { return 0 }
+        let sorted = samples.sorted()
+        let rank = fraction * Double(sorted.count - 1)
+        let lower = Int(rank.rounded(.down))
+        let upper = Int(rank.rounded(.up))
+        guard lower != upper else { return sorted[lower] }
+        return sorted[lower] + ((sorted[upper] - sorted[lower]) * (rank - Double(lower)))
+    }
+
+    private func format(_ milliseconds: Double) -> String {
+        String(format: "%.2f", milliseconds)
     }
 }
 
@@ -312,7 +378,9 @@ struct Status: AsyncParsableCommand {
         print("""
             WhereFilm
             ─────────────────────────────────────────
-            \(stats.assets) assets indexed
+            \(stats.assets) files discovered · \(stats.searchableAssets) searchable now
+            \(stats.visuallyUnderstoodAssets) visually understood · \(stats.transcribedAssets) transcribed
+            \(stats.ocrEnrichedAssets) with on-screen text · \(stats.enrichingAssets) being enriched
             \(stats.moments) moments · \(stats.embeddings) embeddings
             \(stats.transcriptChunks) transcript chunks
             \(stats.volumesOnline) drives online · \(stats.volumesOffline) offline
@@ -398,6 +466,27 @@ struct Doctor: AsyncParsableCommand {
         print("\nQuery understanding")
         print("  Apple Foundation Model: \(QueryPlanner.foundationModelStatus)")
         print("  (optional — the built-in lexicon covers Spanish queries without it)")
+
+        print("\nVector index")
+        for variant in MobileCLIPVariant.allCases {
+            let url = AppPaths.vectorIndex(for: variant.modelID)
+            guard FileManager.default.fileExists(atPath: url.path) else { continue }
+            let bytes = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size]
+                as? Int64) ?? 0
+            // The number the search path actually consults. A graph that is on
+            // disk but reports zero vectors is the difference between a search
+            // that answers in milliseconds and one that scans every vector in
+            // SQLite, so it is worth being able to see it.
+            let index = try? VectorIndex(modelID: variant.modelID,
+                                         dimensions: variant.dimensions)
+            try? await index?.openForSearch()
+            let count = await index?.count ?? 0
+            print("  \(variant.modelID): \(count) vectors · \((bytes / 1_048_576)) MB on disk")
+            if count == 0 {
+                print("    ⚠ the graph is present but reports no vectors — search will fall back")
+                print("      to an exhaustive scan. Run `wherefilm rebuild-index`.")
+            }
+        }
 
         print("\nStorage")
         print("  database : \(AppPaths.database.path)")

@@ -200,7 +200,13 @@ public struct QueryPlanner: Sendable {
         let isSpanish = language == .spanish || Lexicon.looksSpanish(query)
 
         var visualPhrases: [String] = []
-        if isSpanish {
+        // Filenames, slate codes and roll numbers are already answered by FTS.
+        // Sending them through an 81 MB text encoder adds roughly 100 ms warm
+        // (and well over a second cold) while manufacturing irrelevant visual
+        // neighbours. They are the cleanest possible metadata fast path.
+        if !Self.hasDescribableContent(query) {
+            visualPhrases = []
+        } else if isSpanish {
             let translated = Lexicon.translateVisual(query)
             if !translated.isEmpty { visualPhrases.append(translated) }
             // Keep the original too: proper nouns and brand names survive better

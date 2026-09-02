@@ -24,7 +24,95 @@ public final class IndexStore: Sendable {
         }
 
         dbPool = try DatabasePool(path: url.path, configuration: config)
-        try Schema.migrator.migrate(dbPool)
+
+        // Only worth doing when a migration is about to run, which is the only
+        // moment SQLite verifies deferred foreign keys — and measurably so: the
+        // scan costs 260 ms on a 1.4 M-row library, against 20 ms to open a
+        // healthy one. Paying that once per app upgrade is right; paying it at
+        // every launch is not.
+        let migrator = Schema.migrator
+        let pending = try dbPool.read { db in
+            try !migrator.hasCompletedMigrations(db)
+        }
+        if pending { try Self.repairOrphanedDerivedRows(dbPool) }
+        try migrator.migrate(dbPool)
+    }
+
+    /// Drops derived rows whose parent moment is gone, before migrating.
+    ///
+    /// Found on a real library, not imagined. That index held 151 assets, zero
+    /// moments, and 262 preview rows plus 119 OCR rows still pointing at moments
+    /// that no longer existed. Because SQLite checks deferred foreign keys when a
+    /// migration commits, *every* migration after `v1` failed on those orphans —
+    /// so the app could not open its own database at all, and had not been able
+    /// to since `v2` shipped. The failure had nothing to do with the migration
+    /// being applied; it was pre-existing damage that only a schema change made
+    /// fatal.
+    ///
+    /// Repairing rather than refusing is the right call here because of what is
+    /// being deleted. Previews are a budgeted cache and OCR is recomputable from
+    /// keyframes; both are explicitly derived state that the pipeline knows how
+    /// to rebuild. No original, transcript, or asset identity is touched. The
+    /// alternative — a database nobody can open — protects nothing.
+    ///
+    /// Runs on every open and must therefore stay cheap: each check is an
+    /// indexed anti-join that stops at the first orphan, and the deletes only
+    /// run when there is something to delete.
+    private static func repairOrphanedDerivedRows(_ pool: DatabasePool) throws {
+        let orphanChecks = [
+            ("locations", "volumeUUID", "volumes", "volumeUUID"),
+            ("previews", "momentID", "moments", "momentID"),
+            ("ocr_texts", "momentID", "moments", "momentID"),
+            ("ocr_texts", "assetID", "assets", "assetID"),
+            ("embeddings", "momentID", "moments", "momentID"),
+            ("moments", "assetID", "assets", "assetID"),
+            ("transcript_chunks", "assetID", "assets", "assetID"),
+            ("locations", "assetID", "assets", "assetID"),
+            ("jobs", "assetID", "assets", "assetID"),
+        ]
+
+        try pool.writeWithoutTransaction { db in
+            // A table that does not exist yet is not damaged; a brand-new
+            // database reaches this before any migration has run.
+            let existing = Set(try String.fetchAll(db, sql: """
+                SELECT name FROM sqlite_master WHERE type = 'table'
+                """))
+
+            for (child, childKey, parent, parentKey) in orphanChecks {
+                guard existing.contains(child), existing.contains(parent) else { continue }
+                let hasOrphan = try Int.fetchOne(db, sql: """
+                    SELECT 1 FROM \(child) c
+                    WHERE NOT EXISTS (
+                        SELECT 1 FROM \(parent) p WHERE p.\(parentKey) = c.\(childKey)
+                    )
+                    LIMIT 1
+                    """) != nil
+                guard hasOrphan else { continue }
+                try db.execute(sql: """
+                    DELETE FROM \(child)
+                    WHERE NOT EXISTS (
+                        SELECT 1 FROM \(parent) p WHERE p.\(parentKey) = \(child).\(childKey)
+                    )
+                    """)
+            }
+
+            // FTS5 stores asset/moment IDs as UNINDEXED payload columns, so
+            // SQLite's foreign-key checker cannot see stale rows there. They
+            // must be repaired explicitly or deleted OCR/metadata can remain
+            // searchable after a damaged migration.
+            if existing.contains("search_index"), existing.contains("assets"),
+               existing.contains("moments") {
+                try db.execute(sql: """
+                    DELETE FROM search_index
+                    WHERE (assetID IS NOT NULL AND NOT EXISTS (
+                        SELECT 1 FROM assets a WHERE a.assetID = search_index.assetID
+                    ))
+                       OR (momentID IS NOT NULL AND NOT EXISTS (
+                        SELECT 1 FROM moments m WHERE m.momentID = search_index.momentID
+                    ))
+                    """)
+            }
+        }
     }
 
     /// In-memory store, for tests.
@@ -192,11 +280,21 @@ public final class IndexStore: Sendable {
     public func markMissing(volumeUUID: String, pathPrefix: String,
                             seenPaths: Set<String>) throws -> Int {
         try dbPool.write { db in
-            let all = try Location.filter(Column("volumeUUID") == volumeUUID).fetchAll(db)
+            let prefix = pathPrefix.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
             var count = 0
-            for var location in all {
+            // Stream only online rows. A full-volume rescan can have hundreds
+            // of thousands of locations; loading every record just to mark a
+            // handful missing needlessly duplicates the catalog in RAM.
+            let cursor = try Location
+                .filter(Column("volumeUUID") == volumeUUID)
+                .filter(Column("availability") == Availability.online.rawValue)
+                .fetchCursor(db)
+            while var location = try cursor.next() {
+                let isInScope = prefix.isEmpty
+                    || location.relativePath == prefix
+                    || location.relativePath.hasPrefix(prefix + "/")
                 guard location.availability == .online,
-                      pathPrefix.isEmpty || location.relativePath.hasPrefix(pathPrefix),
+                      isInScope,
                       !seenPaths.contains(location.relativePath) else { continue }
                 location.availability = .missing
                 try location.update(db)
@@ -426,6 +524,120 @@ public final class IndexStore: Sendable {
         public let score: Double
     }
 
+    /// How broad a prefix term would be, straight from FTS5's own term
+    /// dictionary.
+    ///
+    /// A prefix wildcard is not uniformly cheap. Measured on a 1.5 M-row index,
+    /// `"camis"*` reaches 62 K rows and ranks in 50 ms, while `"man"*` reaches
+    /// 517 K rows — a third of the whole corpus, because Spanish is full of
+    /// words like *manera* — and ranks in 490 ms. Length does not predict this;
+    /// only the vocabulary does.
+    ///
+    /// `fts5vocab` answers the question directly with a range scan over the term
+    /// index, which costs microseconds and stores nothing. This is the cheap
+    /// measurement that decides whether to do the expensive work — never the
+    /// other way around.
+    public func prefixBreadth(_ prefix: String) throws -> Int {
+        // The upper bound is the prefix with its last scalar incremented, which
+        // is the standard way to express "everything starting with this" as a
+        // range. `{` after `z` happens to work for ASCII and nothing else, so it
+        // is computed properly instead.
+        guard let upper = Self.prefixUpperBound(prefix) else { return 0 }
+        return try dbPool.read { db in
+            try Int.fetchOne(db, sql: """
+                SELECT coalesce(sum(doc), 0) FROM search_vocab
+                WHERE term >= ? AND term < ?
+                """, arguments: [prefix, upper]) ?? 0
+        }
+    }
+
+    static func prefixUpperBound(_ prefix: String) -> String? {
+        guard let last = prefix.unicodeScalars.last,
+              let bumped = Unicode.Scalar(last.value + 1) else { return nil }
+        return String(prefix.unicodeScalars.dropLast()) + String(bumped)
+    }
+
+    /// Total rows in the text index, so breadth can be judged as a fraction of
+    /// the library rather than an absolute number that means something different
+    /// on every Mac.
+    public func searchIndexRowCount() throws -> Int {
+        try dbPool.read { db in
+            try Int.fetchOne(db, sql: "SELECT count(*) FROM search_index") ?? 0
+        }
+    }
+
+    /// One MATCH, several independent top-N lists.
+    ///
+    /// The search engine wants the best transcript hits, the best on-screen-text
+    /// hits and the best filename hits for the same words. Asking three times
+    /// meant FTS5 scored and sorted the same matched rows three times over —
+    /// 1.11 s + 0.72 s + 0.74 s on a 1.5 M-row index.
+    ///
+    /// Merging them has a catch worth writing down, because it is not obvious
+    /// and it cost a measurement to find. FTS5 has a fast path for exactly
+    /// `ORDER BY rank LIMIT n`: it keeps a bounded heap instead of scoring,
+    /// materialising and sorting every match. Adding `AND kind IN (…)` defeats
+    /// it, because the filter has to read each matched row's content to see what
+    /// kind it is. Measured on the same query: 0.07 s bounded and unfiltered,
+    /// versus 0.20 s filtered.
+    ///
+    /// So the fast path is taken as written, over-fetching enough rows to fill
+    /// every group, and the split happens here. A group can only come up short
+    /// if the scan was truncated — and only then is a second, targeted query
+    /// worth paying for. In the ordinary case there is one bounded scan.
+    public func textSearch(pattern: String, groups: [[SearchTextKind]],
+                           limitPerGroup: Int = 200) throws -> [[TextHit]] {
+        var groupOf: [SearchTextKind: Int] = [:]
+        for (index, group) in groups.enumerated() {
+            for kind in group { groupOf[kind] = index }
+        }
+        guard !groupOf.isEmpty else { return groups.map { _ in [] } }
+
+        let overFetch = limitPerGroup * groups.count
+        var out = [[TextHit]](repeating: [], count: groups.count)
+        var scanned = 0
+
+        try dbPool.read { db in
+            let rows = try Row.fetchAll(db, sql: """
+                SELECT text, assetID, momentID, kind, startSeconds, endSeconds,
+                       bm25(search_index, 10.0) AS rank
+                FROM search_index
+                WHERE search_index MATCH ?
+                ORDER BY rank
+                LIMIT ?
+                """, arguments: [pattern, overFetch])
+            scanned = rows.count
+            for row in rows {
+                guard let kind = SearchTextKind(rawValue: row["kind"]),
+                      let group = groupOf[kind],
+                      out[group].count < limitPerGroup else { continue }
+                out[group].append(Self.textHit(row, kind: kind))
+            }
+        }
+
+        // Everything the pattern matches was already seen, so no group is short
+        // for want of looking further.
+        guard scanned >= overFetch else { return out }
+
+        for (index, group) in groups.enumerated()
+        where !group.isEmpty && out[index].count < limitPerGroup {
+            out[index] = try textSearch(pattern: pattern, kinds: group, limit: limitPerGroup)
+        }
+        return out
+    }
+
+    private static func textHit(_ row: Row, kind: SearchTextKind) -> TextHit {
+        TextHit(
+            assetID: row["assetID"],
+            momentID: row["momentID"],
+            kind: kind,
+            startSeconds: row["startSeconds"],
+            endSeconds: row["endSeconds"],
+            text: row["text"],
+            snippet: row["snip"] ?? "",
+            score: -(row["rank"] as Double))
+    }
+
     /// Full-text search over transcripts, OCR and metadata.
     /// `pattern` must already be a valid FTS5 MATCH expression.
     public func textSearch(pattern: String, kinds: [SearchTextKind]? = nil,
@@ -458,6 +670,75 @@ public final class IndexStore: Sendable {
                         snippet: row["snip"] ?? "",
                         score: -(row["rank"] as Double))
                 }
+        }
+    }
+
+    // MARK: - Result hydration
+
+    /// Preview paths for exactly these moments, in one query.
+    public func previewPaths(momentIDs: [Int64]) throws -> [Int64: String] {
+        guard !momentIDs.isEmpty else { return [:] }
+        return try dbPool.read { db in
+            var out: [Int64: String] = [:]
+            let rows = try Row.fetchAll(db, sql: """
+                SELECT momentID, cachePath FROM previews
+                WHERE momentID IN (\(databaseQuestionMarks(count: momentIDs.count)))
+                """, arguments: StatementArguments(momentIDs))
+            for row in rows { out[row["momentID"]] = row["cachePath"] }
+            return out
+        }
+    }
+
+    /// For each (asset, instant), the preview closest in time — in one query.
+    ///
+    /// A transcript match is a moment of speech and carries no keyframe of its
+    /// own, so the useful picture is the frame that was on screen when the words
+    /// were said. Answering that per result meant one query per card; a search
+    /// showing thirty results issued up to sixty. The correlated subquery below
+    /// does the same work in a single round trip, still using the
+    /// `(assetID, startSeconds)` index for each lookup.
+    public func nearestPreviewPaths(targets: [(assetID: Int64, seconds: Double)]) throws
+        -> [Int: String] {
+        guard !targets.isEmpty else { return [:] }
+        let values = Array(repeating: "(?, ?, ?)", count: targets.count).joined(separator: ", ")
+        var arguments: [any DatabaseValueConvertible] = []
+        for (requestID, target) in targets.enumerated() {
+            arguments.append(requestID)
+            arguments.append(target.assetID)
+            arguments.append(target.seconds)
+        }
+        return try dbPool.read { db in
+            var out: [Int: String] = [:]
+            // A correlated `LIMIT 1` would read better, but SQLite cannot see an
+            // outer CTE column from inside a joined subquery. Ranking with a
+            // window function and keeping row 1 per request is the same answer,
+            // and still drives the `(assetID, startSeconds)` index.
+            let rows = try Row.fetchAll(db, sql: """
+                WITH wanted(requestID, assetID, target) AS (VALUES \(values))
+                SELECT requestID, cachePath FROM (
+                    SELECT w.requestID AS requestID, p.cachePath AS cachePath,
+                           row_number() OVER (
+                               PARTITION BY w.requestID
+                               ORDER BY ABS(m.startSeconds - w.target), m.momentID
+                           ) AS position
+                    FROM wanted w
+                    JOIN moments m ON m.assetID = w.assetID
+                    JOIN previews p ON p.momentID = m.momentID
+                )
+                WHERE position = 1
+                """, arguments: StatementArguments(arguments))
+            for row in rows {
+                if let path: String = row["cachePath"] { out[row["requestID"]] = path }
+            }
+            return out
+        }
+    }
+
+    public func volumes(uuids: [String]) throws -> [String: Volume] {
+        guard !uuids.isEmpty else { return [:] }
+        return try dbPool.read { db in
+            let rows = try Volume.filter(uuids.contains(Column("volumeUUID"))).fetchAll(db)
+            return Dictionary(uniqueKeysWithValues: rows.map { ($0.volumeUUID, $0) })
         }
     }
 
@@ -613,6 +894,13 @@ public final class IndexStore: Sendable {
 
     public struct Stats: Sendable {
         public var assets = 0
+        /// Metadata is Tier 1: the asset can already be found by name, folder,
+        /// date or camera even while visual/audio enrichment continues.
+        public var searchableAssets = 0
+        public var visuallyUnderstoodAssets = 0
+        public var transcribedAssets = 0
+        public var ocrEnrichedAssets = 0
+        public var enrichingAssets = 0
         public var moments = 0
         public var embeddings = 0
         public var transcriptChunks = 0
@@ -632,14 +920,38 @@ public final class IndexStore: Sendable {
             func count(_ sql: String) throws -> Int {
                 try Int.fetchOne(db, sql: sql) ?? 0
             }
-            stats.assets = try count("SELECT count(*) FROM assets")
+
+            // This runs every time the menu refreshes. One aggregate pass stays
+            // cheap on a million-row library; four separate COUNT scans do not.
+            if let row = try Row.fetchOne(db, sql: """
+                SELECT count(*) AS total,
+                       coalesce(sum(CASE WHEN (indexedLevels & 1) != 0 THEN 1 ELSE 0 END), 0) AS searchable,
+                       coalesce(sum(CASE WHEN (indexedLevels & 2) != 0 THEN 1 ELSE 0 END), 0) AS visual,
+                       coalesce(sum(CASE WHEN (indexedLevels & 4) != 0 THEN 1 ELSE 0 END), 0) AS transcribed
+                FROM assets
+                """) {
+                stats.assets = row["total"]
+                stats.searchableAssets = row["searchable"]
+                stats.visuallyUnderstoodAssets = row["visual"]
+                stats.transcribedAssets = row["transcribed"]
+            }
+            stats.ocrEnrichedAssets = try count(
+                "SELECT count(DISTINCT assetID) FROM ocr_texts")
             stats.moments = try count("SELECT count(*) FROM moments")
             stats.embeddings = try count("SELECT count(*) FROM embeddings")
             stats.transcriptChunks = try count("SELECT count(*) FROM transcript_chunks")
             stats.volumesOnline = try count("SELECT count(*) FROM volumes WHERE isOnline = 1")
             stats.volumesOffline = try count("SELECT count(*) FROM volumes WHERE isOnline = 0")
-            stats.pendingJobs = try count("SELECT count(*) FROM jobs WHERE state IN ('pending','running')")
-            stats.failedJobs = try count("SELECT count(*) FROM jobs WHERE state = 'failed'")
+            if let row = try Row.fetchOne(db, sql: """
+                SELECT count(DISTINCT CASE WHEN state IN ('pending','running') THEN assetID END) AS enriching,
+                       coalesce(sum(CASE WHEN state IN ('pending','running') THEN 1 ELSE 0 END), 0) AS pending,
+                       coalesce(sum(CASE WHEN state = 'failed' THEN 1 ELSE 0 END), 0) AS failed
+                FROM jobs
+                """) {
+                stats.enrichingAssets = row["enriching"]
+                stats.pendingJobs = row["pending"]
+                stats.failedJobs = row["failed"]
+            }
             stats.missingLocations = try count("SELECT count(*) FROM locations WHERE availability = 'missing'")
             return stats
         }

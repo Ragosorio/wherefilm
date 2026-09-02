@@ -134,6 +134,58 @@ struct KeyframeTests {
         #expect(report.rebound == 1)
         #expect(report.errors.isEmpty)
     }
+
+    @Test("A thousand unchanged thirty-gigabyte videos are checked by metadata")
+    func thousandHugeVideosUseTheRevisionFastPath() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("wf-thousand-huge-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let registry = VolumeRegistry()
+        var files: [(URL, Int64, Date, String)] = []
+        files.reserveCapacity(1_000)
+        for index in 0..<1_000 {
+            let file = root.appendingPathComponent("reel-\(index).mov")
+            FileManager.default.createFile(atPath: file.path, contents: Data())
+            let handle = try FileHandle(forWritingTo: file)
+            try handle.truncate(atOffset: 30_000_000_000)
+            try handle.close()
+            let values = try file.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
+            let resolved = try #require(registry.resolve(file))
+            files.append((file, Int64(try #require(values.fileSize)),
+                          try #require(values.contentModificationDate), resolved.relativePath))
+        }
+
+        let store = try IndexStore.inMemory()
+        let volume = try #require(registry.resolve(root))
+        try store.upsertVolume(Volume(volumeUUID: volume.volume.uuid, name: volume.volume.name))
+        let seededFiles = files
+        try await store.dbPool.write { db in
+            for (index, (_, size, modifiedAt, relativePath)) in seededFiles.enumerated() {
+                let assetID = Int64(index + 1)
+                try db.execute(sql: """
+                    INSERT INTO assets
+                        (assetID, contentKey, mediaType, displayName, indexedAt)
+                    VALUES (?, ?, 'video', ?, ?)
+                    """, arguments: [assetID, "seed:huge:\(index)", "reel-\(index).mov", modifiedAt])
+                try db.execute(sql: """
+                    INSERT INTO locations
+                        (assetID, volumeUUID, relativePath, fileSize, modifiedAt,
+                         availability, lastSeenAt)
+                    VALUES (?, ?, ?, ?, ?, 'online', ?)
+                    """, arguments: [assetID, volume.volume.uuid, relativePath,
+                                     size, modifiedAt, modifiedAt])
+            }
+        }
+
+        let report = try await LibraryScanner(store: store, volumes: registry)
+            .scan(root: root)
+        #expect(report.filesSeen == 1_000)
+        #expect(report.rebound == 1_000)
+        #expect(report.errors.isEmpty)
+        #expect(try store.stats().assets == 1_000)
+    }
 }
 
 private actor GateProbe {
@@ -189,6 +241,7 @@ struct GovernorTests {
         #expect(!decision.isWorking)
         #expect(decision.reason == .userPaused)
         #expect(decision.allowedTasks.isEmpty)
+        #expect(decision.scanConcurrency == 0)
     }
 
     @Test("Pause for two hours expires on its own")
@@ -295,6 +348,60 @@ struct GovernorTests {
         #expect(settings.editorBundleIDs.contains("com.adobe.PremierePro"))
         #expect(settings.editorBundleIDs.contains("com.apple.FinalCut"))
     }
+
+    @Test("A free machine automatically accelerates discovery and enrichment")
+    func freeMachineUsesAcceleratedSmartMode() {
+        var settings = ResourceGovernor.Settings()
+        settings.mode = .smart
+        settings.maxConcurrency = 8
+        let governor = ResourceGovernor(
+            settings: settings,
+            snapshot: ResourceSnapshot(thermalLevel: .nominal, onACPower: true))
+
+        let decision = governor.decide()
+        #expect(decision.reason == .none)
+        #expect(Set(decision.allowedTasks.map(\.rawValue))
+                == Set(JobTask.allCases.map(\.rawValue)))
+        #expect(decision.concurrency == 8)
+        #expect(decision.scanConcurrency == 4)
+    }
+
+    @Test("An open editor keeps visual precision but defers broad work")
+    func openEditorUsesQuietMode() {
+        var settings = ResourceGovernor.Settings()
+        settings.maxConcurrency = 8
+        let editor = "com.blackmagic-design.DaVinciResolve"
+        let governor = ResourceGovernor(
+            settings: settings,
+            snapshot: ResourceSnapshot(
+                onACPower: true,
+                runningBundleIdentifiers: [editor]))
+
+        let decision = governor.decide()
+        #expect(decision.reason == .editorRunning)
+        #expect(decision.allowedTasks.contains(.metadata))
+        #expect(decision.allowedTasks.contains(.visual))
+        #expect(decision.allowedTasks.contains(.ocr))
+        #expect(!decision.allowedTasks.contains(.transcribe))
+        #expect(!decision.allowedTasks.contains(.strongHash))
+        #expect(decision.concurrency == 1)
+        #expect(decision.scanConcurrency == 1)
+    }
+
+    @Test("A frontmost editor protects editing while discovery continues")
+    func frontmostEditorUsesDiscoveryOnly() {
+        let editor = "com.adobe.PremierePro"
+        let governor = ResourceGovernor(
+            snapshot: ResourceSnapshot(
+                onACPower: true,
+                frontmostBundleIdentifier: editor,
+                runningBundleIdentifiers: [editor]))
+
+        let decision = governor.decide()
+        #expect(decision.reason == .editorInForeground)
+        #expect(decision.allowedTasks.map(\.rawValue) == [JobTask.metadata.rawValue])
+        #expect(decision.scanConcurrency == 1)
+    }
 }
 
 @Suite("Media type detection")
@@ -355,6 +462,87 @@ struct VectorIndexTests {
         let hits = try await index.search([0, 1, 0, 0], limit: 2)
         #expect(hits.count == 1)
         #expect((hits.first?.similarity ?? 0) > 0.99)
+    }
+
+    @Test("Opening a writable index for search never downgrades it")
+    func searchWhileIndexingKeepsWritesAlive() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("wf-vec-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let index = try VectorIndex(modelID: "test", dimensions: 4, directory: directory)
+        try await index.openForWriting()
+        try await index.add(momentID: 1, vector: [1, 0, 0, 0])
+
+        // This is exactly what the app does when a search arrives while the
+        // background writer is live.
+        try await index.openForSearch()
+        try await index.add(momentID: 2, vector: [0, 1, 0, 0])
+
+        let hits = try await index.search([0, 1, 0, 0], limit: 2)
+        #expect(await index.count == 2)
+        #expect(hits.first?.momentID == 2)
+    }
+}
+
+@Suite("Preview cache")
+struct PreviewCacheTests {
+    private func image(gray: UInt8) -> CGImage {
+        var pixels = [UInt8](repeating: gray, count: 32 * 32)
+        return CGContext(data: &pixels, width: 32, height: 32,
+                         bitsPerComponent: 8, bytesPerRow: 32,
+                         space: CGColorSpaceCreateDeviceGray(),
+                         bitmapInfo: CGImageAlphaInfo.none.rawValue)!.makeImage()!
+    }
+
+    @Test("A frame batch writes all preview rows")
+    func batchWritesAllRows() throws {
+        let store = try IndexStore.inMemory()
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("wf-preview-batch-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let cache = PreviewCache(store: store, directory: directory)
+        let asset = try store.insert(Asset(contentKey: "preview-batch",
+                                           mediaType: .video, displayName: "batch.mov"))
+        let assetID = try #require(asset.assetID)
+        let moments = try store.insertMoments((0..<3).map {
+            Moment(assetID: assetID, startSeconds: Double($0), endSeconds: Double($0 + 1))
+        })
+        let images = (0..<3).map { image(gray: UInt8(30 + $0 * 30)) }
+        let pending = moments.enumerated().compactMap { index, moment in
+            moment.momentID.map {
+                PreviewCache.PendingPreview(image: images[index], momentID: $0,
+                                             assetID: assetID, pinned: index == 0)
+            }
+        }
+
+        let urls = try cache.store(pending)
+        #expect(urls.count == 3)
+        #expect(try cache.totalBytes() > 0)
+        #expect(try store.dbPool.read { db in
+            try Int.fetchOne(db, sql: "SELECT count(*) FROM previews") ?? 0
+        } == 3)
+    }
+}
+
+@Suite("Interactive indexing priority")
+struct InteractiveIndexingPriorityTests {
+    @Test("Overlapping searches keep background work paused until the last one ends")
+    func searchPriorityIsReferenceCounted() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("wf-priority-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try IndexStore.inMemory()
+        let vectorIndex = try VectorIndex(modelID: "test", dimensions: 4, directory: directory)
+        let indexer = Indexer(store: store, vectorIndex: vectorIndex)
+
+        await indexer.beginInteractiveSearch()
+        await indexer.beginInteractiveSearch()
+        #expect(await indexer.isInteractiveSearchActive)
+        await indexer.endInteractiveSearch()
+        #expect(await indexer.isInteractiveSearchActive)
+        await indexer.endInteractiveSearch()
+        #expect(!(await indexer.isInteractiveSearchActive))
     }
 }
 
