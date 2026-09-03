@@ -2,11 +2,12 @@
 import Layout from '../layouts/Layout.astro';
 import AppMockup from '../components/AppMockup.astro';
 
-// Apuntan a la última release *publicada*. Al sacar una nueva, subir primero
-// los binarios a GitHub y recién después mover estas dos líneas: si se mueven
-// antes, la página queda con un botón de descarga que devuelve 404.
-const downloadURL = 'https://github.com/Ragosorio/wherefilm/releases/download/v0.3.0/WhereFilm-0.3.0-macOS-universal.dmg';
-const releaseURL = 'https://github.com/Ragosorio/wherefilm/releases/tag/v0.3.0';
+// La página solo apunta a una release cuando sus binarios ya están publicados.
+// Mantener la versión aquí evita que el tag y el nombre del DMG se separen.
+const releaseVersion = '0.3.1';
+const releaseTag = `v${releaseVersion}`;
+const downloadURL = `https://github.com/Ragosorio/wherefilm/releases/download/${releaseTag}/WhereFilm-${releaseVersion}-macOS-universal.dmg`;
+const releaseURL = `https://github.com/Ragosorio/wherefilm/releases/tag/${releaseTag}`;
 ---
 
 <Layout
@@ -155,14 +156,14 @@ const releaseURL = 'https://github.com/Ragosorio/wherefilm/releases/tag/v0.3.0';
     <section id="instalar" class="hairline py-32 sm:py-44">
       <div class="shell grid gap-14 lg:grid-cols-[1fr_0.85fr] lg:items-center">
         <div>
-          <p class="eyebrow">Lista para tu Mac</p>
+          <p class="eyebrow">Lista para tu Mac · {releaseTag}</p>
           <h2 class="section-title silver-text">Descarga. Arrastra. Empieza a encontrar.</h2>
           <p class="section-copy">
             La aplicación completa viene dentro de una imagen de disco, como cualquier app de Mac. No necesita Terminal ni descargas adicionales.
           </p>
           <div class="mt-9 flex flex-col gap-3 sm:flex-row">
             <a class="button-primary" href={downloadURL} data-download data-mac-label="Descargar WhereFilm" data-non-mac-label="Disponible solo para Mac"><span data-download-label>Descargar WhereFilm</span></a>
-            <a class="button-secondary" href={releaseURL}>Ver esta versión</a>
+            <a class="button-secondary" href={releaseURL}>Ver la release {releaseTag}</a>
           </div>
         </div>
 
