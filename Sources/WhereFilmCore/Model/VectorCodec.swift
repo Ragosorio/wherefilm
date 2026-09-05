@@ -88,3 +88,12 @@ public enum VectorCodec {
         return result
     }
 }
+
+
+extension Double {
+    /// Confidence values arrive from several places and every one of them is
+    /// supposed to be in 0…1. This makes that true rather than assumed.
+    public func clamped(to range: ClosedRange<Double> = 0...1) -> Double {
+        Swift.min(range.upperBound, Swift.max(range.lowerBound, self))
+    }
+}

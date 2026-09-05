@@ -430,6 +430,8 @@ private struct ResultCard: View {
         case .transcript(let text, _): "Se escucha: “\(text.prefix(92))”"
         case .onScreenText(let text): "Aparece escrito: “\(text.prefix(72))”"
         case .sceneLabel(let text): "Se reconoce: \(text)"
+        case .person(let name, let seconds):
+            "Aparece \(name) en \(SearchResult.timecode(seconds))"
         case .metadata(let text, _): "Coincide con: \(text.prefix(72))"
         }
     }
@@ -440,6 +442,7 @@ private struct ResultCard: View {
         case .transcript: "waveform"
         case .onScreenText: "textformat"
         case .sceneLabel: "tag"
+        case .person: "person.crop.circle"
         case .metadata: "folder"
         }
     }

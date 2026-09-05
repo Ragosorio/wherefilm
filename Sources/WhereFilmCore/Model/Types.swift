@@ -350,3 +350,151 @@ public struct ModelRecord: Codable, Sendable, FetchableRecord, PersistableRecord
         self.createdAt = createdAt
     }
 }
+
+// MARK: - People
+
+/// One detected face, with the vector that decides who it belongs to.
+///
+/// `modelID` is mandatory for the same reason it is on `embeddings`: face
+/// vectors from different models are never comparable, and a better model has to
+/// be a background reindex rather than a destructive migration. It is also what
+/// makes the current, weak descriptor an honest starting point instead of a
+/// commitment.
+public struct FaceRow: Codable, Sendable, FetchableRecord, MutablePersistableRecord {
+    public static let databaseTableName = "faces"
+
+    public var faceID: Int64?
+    public var momentID: Int64
+    public var assetID: Int64
+    public var seconds: Double
+    public var x: Double
+    public var y: Double
+    public var width: Double
+    public var height: Double
+    public var quality: Double?
+    public var roll: Double?
+    public var yaw: Double?
+    public var pitch: Double?
+    public var modelID: String
+    public var dimensions: Int
+    public var quantization: String
+    public var scale: Double
+    public var vector: Data
+    public var personID: Int64?
+    public var assignedBy: String
+
+    public init(faceID: Int64? = nil, momentID: Int64, assetID: Int64, seconds: Double,
+                x: Double, y: Double, width: Double, height: Double,
+                quality: Double? = nil, roll: Double? = nil, yaw: Double? = nil,
+                pitch: Double? = nil, modelID: String, dimensions: Int,
+                quantization: String = VectorQuantization.int8.rawValue, scale: Double = 1,
+                vector: Data, personID: Int64? = nil, assignedBy: String = "auto") {
+        self.faceID = faceID
+        self.momentID = momentID
+        self.assetID = assetID
+        self.seconds = seconds
+        self.x = x; self.y = y; self.width = width; self.height = height
+        self.quality = quality
+        self.roll = roll; self.yaw = yaw; self.pitch = pitch
+        self.modelID = modelID
+        self.dimensions = dimensions
+        self.quantization = quantization
+        self.scale = scale
+        self.vector = vector
+        self.personID = personID
+        self.assignedBy = assignedBy
+    }
+
+    /// True when a person put this face where it is. Automatic passes must not
+    /// move it.
+    public var isPlacedByUser: Bool { assignedBy == "user" }
+
+    public var decodedVector: [Float] {
+        VectorCodec.decode(vector, scale: scale,
+                           quantization: VectorQuantization(rawValue: quantization) ?? .int8)
+    }
+}
+
+/// A cluster of faces that are probably the same person, named or not.
+public struct Person: Codable, Sendable, FetchableRecord, MutablePersistableRecord {
+    public static let databaseTableName = "people"
+
+    public var personID: Int64?
+    public var displayName: String?
+    public var isNamed: Bool
+    public var centroid: Data?
+    public var faceCount: Int
+    public var coverFaceID: Int64?
+    public var createdAt: Date
+    public var updatedAt: Date
+
+    public init(personID: Int64? = nil, displayName: String? = nil, isNamed: Bool = false,
+                centroid: Data? = nil, faceCount: Int = 0, coverFaceID: Int64? = nil,
+                createdAt: Date = Date(), updatedAt: Date = Date()) {
+        self.personID = personID
+        self.displayName = displayName
+        self.isNamed = isNamed
+        self.centroid = centroid
+        self.faceCount = faceCount
+        self.coverFaceID = coverFaceID
+        self.createdAt = createdAt
+        self.updatedAt = updatedAt
+    }
+
+    public var decodedCentroid: [Float]? {
+        centroid.map { VectorCodec.decodeFloat32($0) }
+    }
+}
+
+/// Where a person appears, as an interval. The product's answer to
+/// "¿en qué minuto sale Jorge?" is a range, not an instant, because a person is
+/// on screen for a while and a single timestamp would be a worse answer.
+public struct PersonAppearance: Codable, Sendable, FetchableRecord, MutablePersistableRecord {
+    public static let databaseTableName = "person_appearances"
+
+    public var id: Int64?
+    public var personID: Int64
+    public var assetID: Int64
+    public var startSeconds: Double
+    public var endSeconds: Double
+    public var confidence: Double
+    /// 'face', 'voice' or 'both'.
+    public var source: String
+
+    public init(id: Int64? = nil, personID: Int64, assetID: Int64, startSeconds: Double,
+                endSeconds: Double, confidence: Double, source: String = "face") {
+        self.id = id
+        self.personID = personID
+        self.assetID = assetID
+        self.startSeconds = startSeconds
+        self.endSeconds = endSeconds
+        self.confidence = confidence
+        self.source = source
+    }
+}
+
+/// A correction somebody made, kept so no automatic pass can quietly undo it.
+public struct PersonFeedback: Codable, Sendable, FetchableRecord, MutablePersistableRecord {
+    public static let databaseTableName = "people_feedback"
+
+    public enum Kind: String, Codable, Sendable {
+        case merge, split, name, ignore
+    }
+
+    public var id: Int64?
+    public var kind: String
+    public var aPersonID: Int64?
+    public var bPersonID: Int64?
+    public var faceID: Int64?
+    public var createdAt: Date
+
+    public init(id: Int64? = nil, kind: Kind, aPersonID: Int64? = nil,
+                bPersonID: Int64? = nil, faceID: Int64? = nil, createdAt: Date = Date()) {
+        self.id = id
+        self.kind = kind.rawValue
+        self.aPersonID = aPersonID
+        self.bPersonID = bPersonID
+        self.faceID = faceID
+        self.createdAt = createdAt
+    }
+}

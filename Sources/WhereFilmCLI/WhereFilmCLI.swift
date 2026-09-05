@@ -23,7 +23,7 @@ struct WhereFilm: AsyncParsableCommand {
         version: "0.1.0",
         subcommands: [Scan.self, Index.self, Search.self, Status.self,
                       Volumes.self, Doctor.self, Rebuild.self, Tokenize.self,
-                      Eval.self, BenchmarkFixture.self],
+                      Eval.self, People.self, BenchmarkFixture.self],
         defaultSubcommand: Status.self)
 }
 
@@ -62,6 +62,9 @@ struct Scan: AsyncParsableCommand {
     @Flag(name: .long, help: "Scan and index in one go.")
     var index = false
 
+    @Flag(name: .long, help: "Find and group faces while indexing. Off by default.")
+    var faces = false
+
     func run() async throws {
         let store = try storeOptions.makeStore()
         let root = URL(fileURLWithPath: (path as NSString).expandingTildeInPath)
@@ -95,7 +98,8 @@ struct Scan: AsyncParsableCommand {
         if index {
             print("")
             try await Index.runIndexing(store: store, limit: .max, tasks: JobTask.allCases,
-                                        variant: .s0, fullSpeed: true, quiet: false)
+                                        variant: .s0, fullSpeed: true, quiet: false,
+                                        detectFaces: faces)
         }
     }
 }
@@ -123,6 +127,9 @@ struct Index: AsyncParsableCommand {
     @Flag(name: .long, help: "Skip on-screen text recognition. Useful for isolating where time goes.")
     var noOcr = false
 
+    @Flag(name: .long, help: "Find and group faces. Off by default — this is biometric data.")
+    var faces = false
+
     @Option(name: .long, help: "How many jobs to run at once. Defaults to what the governor allows.")
     var concurrency: Int?
 
@@ -138,17 +145,20 @@ struct Index: AsyncParsableCommand {
 
         try await Self.runIndexing(store: store, limit: limit, tasks: selected,
                                    variant: variant, fullSpeed: fullSpeed, quiet: false,
-                                   recognizeText: !noOcr, concurrency: concurrency)
+                                   recognizeText: !noOcr, detectFaces: faces,
+                                   concurrency: concurrency)
     }
 
     static func runIndexing(store: IndexStore, limit: Int, tasks: [JobTask],
                             variant: MobileCLIPVariant, fullSpeed: Bool, quiet: Bool,
-                            recognizeText: Bool = true, concurrency: Int? = nil) async throws {
+                            recognizeText: Bool = true, detectFaces: Bool = false,
+                            concurrency: Int? = nil) async throws {
         let vectorIndex = try makeVectorIndex(variant: variant)
 
         var indexerOptions = Indexer.Options()
         indexerOptions.variant = variant
         indexerOptions.recognizeText = recognizeText
+        indexerOptions.detectFaces = detectFaces
 
         var governorSettings = ResourceGovernor.Settings()
         governorSettings.mode = fullSpeed ? .fullSpeed : .smart
@@ -517,6 +527,17 @@ struct Doctor: AsyncParsableCommand {
                 print("    ⚠ the graph is present but reports no vectors — search will fall back")
                 print("      to an exhaustive scan. Run `wherefilm rebuild-index`.")
             }
+        }
+
+        // Only shown when there is something to show. A search tool that lists
+        // "0 faces" on every run is advertising a feature nobody asked for.
+        if let people = try? IndexStore(url: AppPaths.database).peopleStats(), people.faces > 0 {
+            print("\nPeople  (opt-in — `wherefilm index --faces`)")
+            print("  \(people.faces) faces · \(people.people) groups · \(people.named) named")
+            print("  descriptor: \(VisionFeaturePrintEmbedder().modelID)")
+            print("  ⚠ that descriptor is Vision's general image feature print, not a face")
+            print("    recognition model — see docs/decisions/0007-faces-reversed.md")
+            print("  delete all of it: wherefilm people forget --yes")
         }
 
         print("\nStorage")

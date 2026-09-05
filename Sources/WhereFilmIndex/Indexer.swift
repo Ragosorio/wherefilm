@@ -32,6 +32,13 @@ public actor Indexer {
         /// and it answers the concrete nouns the smallest CLIP variant is worst
         /// at.
         public var classifyScene = true
+        /// Find, describe and cluster faces.
+        ///
+        /// Off by default, and it should stay that way until somebody turns it
+        /// on deliberately. Face vectors are biometric data about people who are
+        /// not in the room — an archive is full of them — so this is the one
+        /// analysis in the pipeline that is a decision rather than a default.
+        public var detectFaces = false
         /// Languages the text recogniser should expect, and vocabulary it should
         /// prefer. Both nil/empty by default: an archive's own names are the
         /// caller's to supply.
@@ -61,6 +68,11 @@ public actor Indexer {
     nonisolated static let stillDecodes = DecodeGate()
     public var options: Options
     public var governor: ResourceGovernor
+
+    /// Which descriptor turns a face into a vector. Behind a protocol because
+    /// Vision has no face-identity model and the real one has to be installed.
+    let faceEmbedder: any FaceEmbedder = VisionFeaturePrintEmbedder()
+    let faceClusterer = FaceClusterer()
 
     private var imageEncoder: MobileCLIPImageEncoder?
     /// Which compute units the resident encoder was built for, so a change in
@@ -335,6 +347,7 @@ public actor Indexer {
         // refresh leaves invisible dead vectors behind.
         let oldMomentIDs = try store.moments(assetID: assetID).compactMap(\.momentID)
         for momentID in oldMomentIDs { try? await vectorIndex.remove(momentID: momentID) }
+        if options.detectFaces { try store.deleteFaces(assetID: assetID) }
         try store.deleteMoments(assetID: assetID)
 
         var totals = CommitTotals()
@@ -382,12 +395,22 @@ public actor Indexer {
             }
         }
 
+        if options.detectFaces {
+            // Appearances are rebuilt from the faces of the whole asset, not
+            // accumulated per batch: an interval only means something once every
+            // frame it spans has been seen.
+            let faces = try store.faces(assetID: assetID)
+            try store.replaceAppearances(
+                assetID: assetID, AppearanceBuilder.intervals(from: faces, assetID: assetID))
+        }
+
         try store.addLevels(.visual, to: assetID)
         _ = try? previews.enforceBudget()
 
         var detail = "\(totals.moments) moments"
         if totals.ocr > 0 { detail += ", \(totals.ocr) with on-screen text" }
         if totals.labels > 0 { detail += ", \(totals.labels) labels" }
+        if totals.faces > 0 { detail += ", \(totals.faces) faces" }
         return detail
     }
 
@@ -395,12 +418,41 @@ public actor Indexer {
         var moments = 0
         var ocr = 0
         var labels = 0
+        var faces = 0
 
         static func += (lhs: inout CommitTotals, rhs: CommitTotals) {
             lhs.moments += rhs.moments
             lhs.ocr += rhs.ocr
             lhs.labels += rhs.labels
+            lhs.faces += rhs.faces
         }
+    }
+
+    /// Crops, gates and embeds the faces found in one frame.
+    ///
+    /// The gate is doing most of the work here. Real footage is full of faces
+    /// that are thirty pixels wide, motion-blurred or turned away, and embedding
+    /// those is not merely wasted effort: they land between clusters and are
+    /// precisely how one person ends up scattered across a dozen of them.
+    nonisolated static func describeFaces(
+        _ faces: [DetectedFace], in image: CGImage, momentID: Int64, assetID: Int64,
+        seconds: Double, embedder: any FaceEmbedder
+    ) async -> [FaceRow] {
+        var rows: [FaceRow] = []
+        for face in faces {
+            guard FaceCrop.isWorthEmbedding(face, frameWidth: image.width),
+                  let crop = FaceCrop.cut(face, from: image),
+                  let vector = try? await embedder.embed(crop) else { continue }
+            let encoded = VectorCodec.encodeInt8(vector)
+            rows.append(FaceRow(
+                momentID: momentID, assetID: assetID, seconds: seconds,
+                x: face.x, y: face.y, width: face.width, height: face.height,
+                quality: face.quality, roll: face.roll, yaw: face.yaw, pitch: face.pitch,
+                modelID: embedder.modelID, dimensions: vector.count,
+                quantization: VectorQuantization.int8.rawValue, scale: encoded.scale,
+                vector: encoded.data))
+        }
+        return rows
     }
 
     /// Recorded with every label, so a future taxonomy can be told apart from
@@ -455,13 +507,14 @@ public actor Indexer {
         // and it catches signs, badges, slates and screens that CLIP reliably
         // misses. The whole batch goes at once — one frame at a time left the
         // machine idle waiting on Vision.
-        if options.recognizeText || options.classifyScene {
+        if options.recognizeText || options.classifyScene || options.detectFaces {
             // One pass over the frames answers every question about them. When
             // helpers are available this is also one process hop per frame
             // instead of three, because moving the frame is the expensive part.
             var analyzerOptions = FrameAnalyzer.Options()
             analyzerOptions.recognizesText = options.recognizeText
             analyzerOptions.classifiesScene = options.classifyScene
+            analyzerOptions.detectsFaces = options.detectFaces
             analyzerOptions.screensFirst = screenText
             analyzerOptions.recognitionLanguages = options.recognitionLanguages
             analyzerOptions.customWords = options.customWords
@@ -470,12 +523,19 @@ public actor Indexer {
 
             var ocrRows: [OCRText] = []
             var labelRows: [LabelRow] = []
+            var faceRows: [FaceRow] = []
             var times: [Int64: (Double, Double)] = [:]
             for (index, moment) in moments.enumerated() {
                 guard let momentID = moment.momentID, index < analyses.count else { continue }
                 let analysis = analyses[index]
                 guard !analysis.isEmpty else { continue }
                 times[momentID] = (moment.startSeconds, moment.endSeconds)
+                if options.detectFaces, !analysis.faces.isEmpty {
+                    faceRows += await Self.describeFaces(
+                        analysis.faces, in: frames[index].image, momentID: momentID,
+                        assetID: assetID, seconds: frames[index].seconds,
+                        embedder: faceEmbedder)
+                }
                 if let hit = analysis.text {
                     ocrRows.append(OCRText(momentID: momentID, assetID: assetID,
                                            text: hit.text, confidence: hit.confidence))
@@ -494,6 +554,11 @@ public actor Indexer {
             if !labelRows.isEmpty {
                 try store.insertLabels(labelRows, momentTimes: times)
                 totals.labels = labelRows.count
+            }
+            if !faceRows.isEmpty {
+                let stored = try store.insertFaces(faceRows)
+                try await faceClusterer.assign(faces: stored, store: store)
+                totals.faces = stored.count
             }
         }
         return totals

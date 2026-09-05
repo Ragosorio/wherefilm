@@ -12,6 +12,7 @@ public enum Evidence: Sendable {
     case transcript(text: String, seconds: Double)
     case onScreenText(text: String)
     case sceneLabel(text: String)
+    case person(name: String, seconds: Double)
     case metadata(text: String, kind: SearchTextKind)
 
     public var label: String {
@@ -22,6 +23,8 @@ public enum Evidence: Sendable {
             "dialogue · \(SearchResult.timecode(seconds)) · \"\(text.prefix(90))\""
         case .onScreenText(let text): "on-screen text · \"\(text.prefix(60))\""
         case .sceneLabel(let text): "recognised · \(text)"
+        case .person(let name, let seconds):
+            "person · \(name) · \(SearchResult.timecode(seconds))"
         case .metadata(let text, let kind): "\(kind.rawValue) · \(text.prefix(60))"
         }
     }
@@ -160,6 +163,9 @@ public struct SearchEngine: Sendable {
         /// opinion about what the frame shows, from a model that is better at
         /// concrete nouns and much worse at everything else.
         public var sceneLabel = 0.2
+        /// People. Weighted above everything because "¿dónde sale Jorge?" has a
+        /// right answer and the rest of the query is usually context.
+        public var person = 0.5
         public var metadata = 0.08
         /// RRF's damping constant. 60 is the value from the original paper and
         /// the industry default; smaller values make the top rank dominate more.
@@ -184,6 +190,10 @@ public struct SearchEngine: Sendable {
         /// "dog" is right or wrong, with little in between, but its taxonomy is
         /// far smaller than the things people search for.
         public var sceneLabelTrust = 0.85
+        /// A named person is the strongest signal in the system, and the only
+        /// one a human being personally vouched for. It is still not 1.0: the
+        /// cluster behind the name was assembled by a model.
+        public var personTrust = 0.98
         /// How rare a label must be, in this library, to count as evidence.
         public var minimumLabelRarity = 0.35
         /// A filename match says something about the file, not about the frame.
@@ -454,7 +464,7 @@ public struct SearchEngine: Sendable {
     }
 
     private enum Channel: Hashable {
-        case visual, transcript, ocr, label, metadata
+        case visual, transcript, ocr, label, person, metadata
     }
 
     private func visualCandidates(plan: SearchPlan, vectorIndex: VectorIndex?) async throws -> [Candidate] {
@@ -614,6 +624,8 @@ public struct SearchEngine: Sendable {
         // The transcript channel and the literal channels usually run the same
         // words. When they do, they are one MATCH and one bm25 pass, split three
         // ways — not three identical scans of the same index.
+        candidates += personCandidates(plan: plan)
+
         // Labels are matched against the *English* half of the query, because
         // Vision's taxonomy is English and the person's words usually are not.
         let labelPattern = Self.labelPattern(for: plan.visualPhrases, budget: breadth)
@@ -671,6 +683,58 @@ public struct SearchEngine: Sendable {
                                                       halfLife: options.weights.rankHalfLife),
                       evidence: .onScreenText(text: hit.text))
         }
+    }
+
+    /// Everywhere a person somebody has named appears.
+    ///
+    /// This is the channel the rest of the system exists to make possible. It
+    /// does not ask a model what the query means: it asks whether the words name
+    /// somebody in this library, and if they do it answers with the intervals
+    /// where that person is on screen. "Jorge apareció en 14:12" is a lookup, not
+    /// an inference, which is why it is trusted more than anything else here.
+    ///
+    /// The name index is trigram-tokenised, so "Jorge Alvares" finds
+    /// "Jorge Álvarez" — a misspelling shares almost every three-character run
+    /// with the real name, which a prefix index cannot see.
+    private func personCandidates(plan: SearchPlan) -> [Candidate] {
+        let query = plan.rawQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard query.count >= 3, let matches = try? store.people(namedLike: query),
+              !matches.isEmpty else { return [] }
+
+        var candidates: [Candidate] = []
+        for (position, match) in matches.enumerated() {
+            guard let appearances = try? store.appearances(personID: match.personID),
+                  !appearances.isEmpty else { continue }
+            // How much of the name the query actually contains. Asking for
+            // "Jorge" when the library holds "Jorge Álvarez" and "Jorge Méndez"
+            // is a real question with two right answers, and both should rank
+            // below an exact match on either.
+            let coverage = Self.termCoverage(text: match.name,
+                                             terms: [query])
+            let nameStrength = max(coverage, Self.nameOverlap(query: query, name: match.name))
+            let decay = 1 / (1 + Double(position) / max(options.weights.rankHalfLife, 1))
+            for appearance in appearances {
+                candidates.append(Candidate(
+                    assetID: appearance.assetID, momentID: nil,
+                    seconds: appearance.startSeconds, endSeconds: appearance.endSeconds,
+                    channel: .person, rank: position + 1, rawScore: -match.rank,
+                    confidence: min(1, nameStrength * decay * appearance.confidence.clamped()),
+                    evidence: .person(name: match.name, seconds: appearance.startSeconds)))
+            }
+        }
+        return candidates
+    }
+
+    /// The fraction of a stored name's words that appear in the query.
+    ///
+    /// Measured this way round on purpose: a person searching for "jorge" should
+    /// find Jorge Álvarez, but less confidently than one who typed both names.
+    static func nameOverlap(query: String, name: String) -> Double {
+        let asked = Set(Lexicon.fold(query).split(separator: " ").map(String.init))
+        let stored = Lexicon.fold(name).split(separator: " ").map(String.init)
+        guard !stored.isEmpty, !asked.isEmpty else { return 0 }
+        let matched = stored.filter { asked.contains($0) }.count
+        return Double(matched) / Double(stored.count)
     }
 
     private func labelCandidates(_ hits: [IndexStore.TextHit], phrases: [String]) -> [Candidate] {
@@ -905,6 +969,7 @@ public struct SearchEngine: Sendable {
         case .transcript: options.weights.transcript
         case .ocr: options.weights.onScreenText
         case .label: options.weights.sceneLabel
+        case .person: options.weights.person
         case .metadata: options.weights.metadata
         }
     }
@@ -915,6 +980,7 @@ public struct SearchEngine: Sendable {
         case .transcript: options.weights.transcriptTrust
         case .ocr: options.weights.onScreenTextTrust
         case .label: options.weights.sceneLabelTrust
+        case .person: options.weights.personTrust
         case .metadata: options.weights.metadataTrust
         }
     }

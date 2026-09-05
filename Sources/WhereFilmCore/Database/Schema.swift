@@ -232,6 +232,103 @@ public enum Schema {
             try db.create(index: "idx_labels_identifier", on: "labels", columns: ["identifier"])
         }
 
+        // People: faces, the clusters they form, and where they appear.
+        //
+        // This reverses a decision the original plan made deliberately — face
+        // recognition was left out of the core because it is biometric data and
+        // "el chavo de playera azul" can be answered without knowing who anyone
+        // is. That reasoning was right about the cost and wrong about the need:
+        // the archive this is built for is full of people who are searched for
+        // by name, and "¿dónde aparece Jorge?" is not answerable any other way.
+        //
+        // Reversing it comes with obligations, and they are structural rather
+        // than aspirational: every face vector records the model that produced
+        // it so a better model is a background reindex; a name is only ever set
+        // by a person; and the whole subtree can be deleted without touching
+        // anything else the index knows.
+        migrator.registerMigration("v7-people") { db in
+            try db.create(table: "people") { t in
+                t.autoIncrementedPrimaryKey("personID")
+                // NULL until somebody says who this is. An unnamed cluster is
+                // still useful — "more of this person" — and still deletable.
+                t.column("displayName", .text)
+                t.column("isNamed", .boolean).notNull().defaults(to: false)
+                t.column("centroid", .blob)
+                t.column("faceCount", .integer).notNull().defaults(to: 0)
+                t.column("coverFaceID", .integer)
+                t.column("createdAt", .datetime).notNull()
+                t.column("updatedAt", .datetime).notNull()
+            }
+
+            try db.create(table: "faces") { t in
+                t.autoIncrementedPrimaryKey("faceID")
+                t.column("momentID", .integer).notNull()
+                    .references("moments", onDelete: .cascade)
+                t.column("assetID", .integer).notNull()
+                    .references("assets", onDelete: .cascade)
+                t.column("seconds", .double).notNull()
+                // Normalised to the frame, origin lower-left, as Vision reports.
+                t.column("x", .double).notNull()
+                t.column("y", .double).notNull()
+                t.column("width", .double).notNull()
+                t.column("height", .double).notNull()
+                t.column("quality", .double)
+                t.column("roll", .double)
+                t.column("yaw", .double)
+                t.column("pitch", .double)
+                t.column("modelID", .text).notNull()
+                t.column("dimensions", .integer).notNull()
+                t.column("quantization", .text).notNull()
+                t.column("scale", .double).notNull().defaults(to: 1.0)
+                t.column("vector", .blob).notNull()
+                t.column("personID", .integer)
+                    .references("people", onDelete: .setNull)
+                // 'auto' or 'user'. An automatic pass may move an 'auto' face
+                // between clusters; it may never move one a person placed.
+                t.column("assignedBy", .text).notNull().defaults(to: "auto")
+            }
+            try db.create(index: "idx_faces_person", on: "faces", columns: ["personID"])
+            try db.create(index: "idx_faces_asset", on: "faces", columns: ["assetID", "seconds"])
+            try db.create(index: "idx_faces_model", on: "faces", columns: ["modelID"])
+
+            // What a person corrected, kept forever and separately from what was
+            // derived. A consolidation pass reads this before it merges anything.
+            try db.create(table: "people_feedback") { t in
+                t.autoIncrementedPrimaryKey("id")
+                t.column("kind", .text).notNull()
+                t.column("aPersonID", .integer)
+                t.column("bPersonID", .integer)
+                t.column("faceID", .integer)
+                t.column("createdAt", .datetime).notNull()
+            }
+
+            // "Jorge apareció en el minuto X" — intervals, not instants.
+            try db.create(table: "person_appearances") { t in
+                t.autoIncrementedPrimaryKey("id")
+                t.column("personID", .integer).notNull()
+                    .references("people", onDelete: .cascade)
+                t.column("assetID", .integer).notNull()
+                    .references("assets", onDelete: .cascade)
+                t.column("startSeconds", .double).notNull()
+                t.column("endSeconds", .double).notNull()
+                t.column("confidence", .double).notNull()
+                t.column("source", .text).notNull()
+            }
+            try db.create(index: "idx_appearances_person", on: "person_appearances",
+                          columns: ["personID", "assetID", "startSeconds"])
+            try db.create(index: "idx_appearances_asset", on: "person_appearances",
+                          columns: ["assetID", "startSeconds"])
+
+            // Names are searched with typos and without accents. A trigram index
+            // finds "Alvares" inside "ÁLVAREZ", which a prefix index cannot, and
+            // it is small because it holds only the names a person typed.
+            try db.execute(sql: """
+                CREATE VIRTUAL TABLE person_names USING fts5(
+                    name, personID UNINDEXED, tokenize = 'trigram'
+                )
+                """)
+        }
+
         return migrator
     }
 }
