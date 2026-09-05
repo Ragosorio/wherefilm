@@ -1,0 +1,969 @@
+{
+  "name": "WhereFilm quality v1 — real-media evaluation library",
+  "library": "Scripts/make-eval-library.swift (43 assets: 26 scenes, 12 distractors, 3 text cards, 2 narrated videos)",
+  "defaultToleranceSeconds": 30,
+  "cases": [
+    {
+      "id": "playa-es",
+      "query": "playa con olas",
+      "category": "scene",
+      "lang": "es",
+      "cluster": "beach",
+      "relevant": [
+        {
+          "asset": "BEACH_0001.heic",
+          "grade": 3
+        },
+        {
+          "asset": "COAST_0002.heic",
+          "grade": 3
+        },
+        {
+          "asset": "SHORE_ROCKS_0003.heic",
+          "grade": 3
+        },
+        {
+          "asset": "WATERS_EDGE_0004.heic",
+          "grade": 3
+        },
+        {
+          "asset": "CATALINA_COAST_0005.heic",
+          "grade": 3
+        },
+        {
+          "asset": "CATALINA_SHORE_0006.heic",
+          "grade": 3
+        }
+      ]
+    },
+    {
+      "id": "playa-coloquial",
+      "query": "la orilla del mar",
+      "category": "scene-colloquial",
+      "lang": "es",
+      "cluster": "beach",
+      "relevant": [
+        {
+          "asset": "BEACH_0001.heic",
+          "grade": 3
+        },
+        {
+          "asset": "COAST_0002.heic",
+          "grade": 3
+        },
+        {
+          "asset": "SHORE_ROCKS_0003.heic",
+          "grade": 3
+        },
+        {
+          "asset": "WATERS_EDGE_0004.heic",
+          "grade": 3
+        },
+        {
+          "asset": "CATALINA_COAST_0005.heic",
+          "grade": 3
+        },
+        {
+          "asset": "CATALINA_SHORE_0006.heic",
+          "grade": 3
+        }
+      ]
+    },
+    {
+      "id": "playa-en",
+      "query": "a sandy beach with waves",
+      "category": "scene",
+      "lang": "en",
+      "cluster": "beach",
+      "relevant": [
+        {
+          "asset": "BEACH_0001.heic",
+          "grade": 3
+        },
+        {
+          "asset": "COAST_0002.heic",
+          "grade": 3
+        },
+        {
+          "asset": "SHORE_ROCKS_0003.heic",
+          "grade": 3
+        },
+        {
+          "asset": "WATERS_EDGE_0004.heic",
+          "grade": 3
+        },
+        {
+          "asset": "CATALINA_COAST_0005.heic",
+          "grade": 3
+        },
+        {
+          "asset": "CATALINA_SHORE_0006.heic",
+          "grade": 3
+        }
+      ]
+    },
+    {
+      "id": "montana-es",
+      "query": "montañas",
+      "category": "scene",
+      "lang": "es",
+      "cluster": "mountain",
+      "relevant": [
+        {
+          "asset": "MOUNTAIN_0011.heic",
+          "grade": 3
+        },
+        {
+          "asset": "PEAK_0012.heic",
+          "grade": 3
+        },
+        {
+          "asset": "VALLEY_0013.heic",
+          "grade": 3
+        },
+        {
+          "asset": "AERIAL_0014.heic",
+          "grade": 3
+        }
+      ]
+    },
+    {
+      "id": "montana-sin-acento",
+      "query": "montanas verdes al amanecer",
+      "category": "scene-noaccent",
+      "lang": "es",
+      "cluster": "mountain",
+      "relevant": [
+        {
+          "asset": "MOUNTAIN_0011.heic",
+          "grade": 3
+        },
+        {
+          "asset": "PEAK_0012.heic",
+          "grade": 3
+        },
+        {
+          "asset": "VALLEY_0013.heic",
+          "grade": 3
+        },
+        {
+          "asset": "AERIAL_0014.heic",
+          "grade": 3
+        }
+      ]
+    },
+    {
+      "id": "montana-en",
+      "query": "green mountains",
+      "category": "scene",
+      "lang": "en",
+      "cluster": "mountain",
+      "relevant": [
+        {
+          "asset": "MOUNTAIN_0011.heic",
+          "grade": 3
+        },
+        {
+          "asset": "PEAK_0012.heic",
+          "grade": 3
+        },
+        {
+          "asset": "VALLEY_0013.heic",
+          "grade": 3
+        },
+        {
+          "asset": "AERIAL_0014.heic",
+          "grade": 3
+        }
+      ]
+    },
+    {
+      "id": "desierto-es",
+      "query": "el desierto con dunas de arena",
+      "category": "scene",
+      "lang": "es",
+      "cluster": "desert",
+      "relevant": [
+        {
+          "asset": "DESERT_0021.heic",
+          "grade": 3
+        }
+      ]
+    },
+    {
+      "id": "desierto-en",
+      "query": "desert sand dunes",
+      "category": "scene",
+      "lang": "en",
+      "cluster": "desert",
+      "relevant": [
+        {
+          "asset": "DESERT_0021.heic",
+          "grade": 3
+        }
+      ]
+    },
+    {
+      "id": "acantilado-es",
+      "query": "acantilados junto al mar",
+      "category": "scene",
+      "lang": "es",
+      "cluster": "cliffs",
+      "relevant": [
+        {
+          "asset": "CLIFFS_0031.heic",
+          "grade": 3
+        },
+        {
+          "asset": "SILHOUETTE_0032.heic",
+          "grade": 3
+        }
+      ]
+    },
+    {
+      "id": "acantilado-sin-acento",
+      "query": "acantilado al lado del oceano",
+      "category": "scene-noaccent",
+      "lang": "es",
+      "cluster": "cliffs",
+      "relevant": [
+        {
+          "asset": "CLIFFS_0031.heic",
+          "grade": 3
+        },
+        {
+          "asset": "SILHOUETTE_0032.heic",
+          "grade": 3
+        }
+      ]
+    },
+    {
+      "id": "atardecer-es",
+      "query": "atardecer frente al mar",
+      "category": "scene",
+      "lang": "es",
+      "cluster": "sunset",
+      "relevant": [
+        {
+          "asset": "SUNSET_0041.heic",
+          "grade": 3
+        },
+        {
+          "asset": "EVENING_0042.heic",
+          "grade": 3
+        },
+        {
+          "asset": "HORIZON_0043.heic",
+          "grade": 3
+        },
+        {
+          "asset": "SONOMA_0044.heic",
+          "grade": 3
+        }
+      ]
+    },
+    {
+      "id": "atardecer-coloquial",
+      "query": "el sol cayendo en el horizonte",
+      "category": "scene-colloquial",
+      "lang": "es",
+      "cluster": "sunset",
+      "relevant": [
+        {
+          "asset": "SUNSET_0041.heic",
+          "grade": 3
+        },
+        {
+          "asset": "EVENING_0042.heic",
+          "grade": 3
+        },
+        {
+          "asset": "HORIZON_0043.heic",
+          "grade": 3
+        },
+        {
+          "asset": "SONOMA_0044.heic",
+          "grade": 3
+        }
+      ]
+    },
+    {
+      "id": "atardecer-en",
+      "query": "golden sunset over the ocean",
+      "category": "scene",
+      "lang": "en",
+      "cluster": "sunset",
+      "relevant": [
+        {
+          "asset": "SUNSET_0041.heic",
+          "grade": 3
+        },
+        {
+          "asset": "EVENING_0042.heic",
+          "grade": 3
+        },
+        {
+          "asset": "HORIZON_0043.heic",
+          "grade": 3
+        },
+        {
+          "asset": "SONOMA_0044.heic",
+          "grade": 3
+        }
+      ]
+    },
+    {
+      "id": "noche-es",
+      "query": "paisaje de noche, oscuro",
+      "category": "scene",
+      "lang": "es",
+      "cluster": "night",
+      "relevant": [
+        {
+          "asset": "NIGHT_GRASS_0051.heic",
+          "grade": 3
+        },
+        {
+          "asset": "NIGHT_PLANTS_0052.heic",
+          "grade": 3
+        },
+        {
+          "asset": "DARK_0053.heic",
+          "grade": 3
+        }
+      ]
+    },
+    {
+      "id": "noche-en",
+      "query": "night landscape in the dark",
+      "category": "scene",
+      "lang": "en",
+      "cluster": "night",
+      "relevant": [
+        {
+          "asset": "NIGHT_GRASS_0051.heic",
+          "grade": 3
+        },
+        {
+          "asset": "NIGHT_PLANTS_0052.heic",
+          "grade": 3
+        },
+        {
+          "asset": "DARK_0053.heic",
+          "grade": 3
+        }
+      ]
+    },
+    {
+      "id": "lago-es",
+      "query": "un lago tranquilo",
+      "category": "scene",
+      "lang": "es",
+      "cluster": "lake",
+      "relevant": [
+        {
+          "asset": "LAKE_0061.heic",
+          "grade": 3
+        }
+      ]
+    },
+    {
+      "id": "nubes-es",
+      "query": "nubes en el cielo",
+      "category": "scene",
+      "lang": "es",
+      "cluster": "clouds",
+      "relevant": [
+        {
+          "asset": "CLOUDS_0071.heic",
+          "grade": 3
+        }
+      ]
+    },
+    {
+      "id": "arbol-es",
+      "query": "un árbol solo",
+      "category": "scene",
+      "lang": "es",
+      "cluster": "tree",
+      "relevant": [
+        {
+          "asset": "TREE_0081.heic",
+          "grade": 3
+        }
+      ]
+    },
+    {
+      "id": "arbol-en",
+      "query": "a single tree",
+      "category": "scene",
+      "lang": "en",
+      "cluster": "tree",
+      "relevant": [
+        {
+          "asset": "TREE_0081.heic",
+          "grade": 3
+        }
+      ]
+    },
+    {
+      "id": "carretera-es",
+      "query": "una carretera entre el campo",
+      "category": "scene",
+      "lang": "es",
+      "cluster": "road",
+      "relevant": [
+        {
+          "asset": "ROAD_0091.heic",
+          "grade": 3
+        }
+      ]
+    },
+    {
+      "id": "carretera-en",
+      "query": "an empty road",
+      "category": "scene",
+      "lang": "en",
+      "cluster": "road",
+      "relevant": [
+        {
+          "asset": "ROAD_0091.heic",
+          "grade": 3
+        }
+      ]
+    },
+    {
+      "id": "domo-es",
+      "query": "un domo, arquitectura",
+      "category": "scene",
+      "lang": "es",
+      "cluster": "dome",
+      "relevant": [
+        {
+          "asset": "DOME_0101.heic",
+          "grade": 3
+        }
+      ]
+    },
+    {
+      "id": "grafico-es",
+      "query": "fondo abstracto de colores",
+      "category": "scene",
+      "lang": "es",
+      "cluster": "graphics",
+      "relevant": [
+        {
+          "asset": "GFX_0201.heic",
+          "grade": 1
+        },
+        {
+          "asset": "GFX_0202.heic",
+          "grade": 1
+        },
+        {
+          "asset": "GFX_0203.heic",
+          "grade": 1
+        },
+        {
+          "asset": "GFX_0204.heic",
+          "grade": 1
+        },
+        {
+          "asset": "GFX_0205.heic",
+          "grade": 1
+        },
+        {
+          "asset": "GFX_0206.heic",
+          "grade": 1
+        },
+        {
+          "asset": "GFX_0207.heic",
+          "grade": 1
+        },
+        {
+          "asset": "GFX_0208.heic",
+          "grade": 1
+        },
+        {
+          "asset": "GFX_0209.heic",
+          "grade": 1
+        },
+        {
+          "asset": "GFX_0210.heic",
+          "grade": 1
+        },
+        {
+          "asset": "GFX_0211.heic",
+          "grade": 1
+        },
+        {
+          "asset": "GFX_0212.heic",
+          "grade": 1
+        }
+      ]
+    },
+    {
+      "id": "ocr-toma7",
+      "query": "TOMA 7",
+      "category": "on-screen-text",
+      "lang": "es",
+      "cluster": "slate",
+      "relevant": [
+        {
+          "asset": "SLATE_A0045.png",
+          "grade": 3
+        }
+      ]
+    },
+    {
+      "id": "ocr-rollo",
+      "query": "rollo A0045",
+      "category": "on-screen-text",
+      "lang": "es",
+      "cluster": "slate",
+      "relevant": [
+        {
+          "asset": "SLATE_A0045.png",
+          "grade": 3
+        }
+      ]
+    },
+    {
+      "id": "ocr-claqueta-esc",
+      "query": "ESC 12 TAKE 3",
+      "category": "on-screen-text",
+      "lang": "es",
+      "cluster": "slate",
+      "relevant": [
+        {
+          "asset": "SLATE_A0045.png",
+          "grade": 3
+        }
+      ]
+    },
+    {
+      "id": "ocr-cotizacion",
+      "query": "cotización 4582",
+      "category": "on-screen-text",
+      "lang": "es",
+      "cluster": "quote",
+      "relevant": [
+        {
+          "asset": "COTIZACION_4582.png",
+          "grade": 3
+        }
+      ]
+    },
+    {
+      "id": "ocr-cotizacion-sin-acento",
+      "query": "cotizacion 4582",
+      "category": "on-screen-text-noaccent",
+      "lang": "es",
+      "cluster": "quote",
+      "relevant": [
+        {
+          "asset": "COTIZACION_4582.png",
+          "grade": 3
+        }
+      ]
+    },
+    {
+      "id": "ocr-acme",
+      "query": "ACME PRODUCCIONES",
+      "category": "on-screen-text",
+      "lang": "es",
+      "cluster": "quote",
+      "relevant": [
+        {
+          "asset": "COTIZACION_4582.png",
+          "grade": 3
+        }
+      ]
+    },
+    {
+      "id": "ocr-monto",
+      "query": "presupuesto total 18,400",
+      "category": "on-screen-text",
+      "lang": "es",
+      "cluster": "quote",
+      "relevant": [
+        {
+          "asset": "COTIZACION_4582.png",
+          "grade": 3
+        }
+      ]
+    },
+    {
+      "id": "ocr-prensa",
+      "query": "gafete de prensa",
+      "category": "on-screen-text",
+      "lang": "es",
+      "cluster": "badge",
+      "relevant": [
+        {
+          "asset": "GAFETE_PRENSA.png",
+          "grade": 3
+        }
+      ]
+    },
+    {
+      "id": "ocr-festival",
+      "query": "FESTIVAL 2026",
+      "category": "on-screen-text",
+      "lang": "es",
+      "cluster": "badge",
+      "relevant": [
+        {
+          "asset": "GAFETE_PRENSA.png",
+          "grade": 3
+        }
+      ]
+    },
+    {
+      "id": "nombre-jorge",
+      "query": "Jorge Alvarez",
+      "category": "person-name",
+      "lang": "es",
+      "cluster": "jorge",
+      "relevant": [
+        {
+          "asset": "GAFETE_PRENSA.png",
+          "grade": 3
+        },
+        {
+          "asset": "SLATE_A0045.png",
+          "grade": 3
+        }
+      ]
+    },
+    {
+      "id": "nombre-jorge-acento",
+      "query": "Jorge Álvarez",
+      "category": "person-name-accent",
+      "lang": "es",
+      "cluster": "jorge",
+      "relevant": [
+        {
+          "asset": "GAFETE_PRENSA.png",
+          "grade": 3
+        },
+        {
+          "asset": "SLATE_A0045.png",
+          "grade": 3
+        }
+      ]
+    },
+    {
+      "id": "nombre-jorge-typo",
+      "query": "Jorge Alvares",
+      "category": "person-name-typo",
+      "lang": "es",
+      "cluster": "jorge",
+      "relevant": [
+        {
+          "asset": "GAFETE_PRENSA.png",
+          "grade": 3
+        },
+        {
+          "asset": "SLATE_A0045.png",
+          "grade": 3
+        }
+      ]
+    },
+    {
+      "id": "nombre-manu",
+      "query": "Manu Gonzalez",
+      "category": "person-name",
+      "lang": "es",
+      "cluster": "manu",
+      "relevant": [
+        {
+          "asset": "COTIZACION_4582.png",
+          "grade": 3
+        }
+      ]
+    },
+    {
+      "id": "habla-presupuesto",
+      "query": "donde hablan del presupuesto",
+      "category": "dialogue",
+      "lang": "es",
+      "cluster": "juan",
+      "relevant": [
+        {
+          "asset": "INTERVIEW_JUAN_03.mov",
+          "grade": 3
+        }
+      ]
+    },
+    {
+      "id": "habla-dinero",
+      "query": "no teníamos dinero para la segunda etapa",
+      "category": "dialogue",
+      "lang": "es",
+      "cluster": "juan",
+      "relevant": [
+        {
+          "asset": "INTERVIEW_JUAN_03.mov",
+          "grade": 3
+        }
+      ]
+    },
+    {
+      "id": "habla-junio",
+      "query": "la campaña comienza hasta junio",
+      "category": "dialogue",
+      "lang": "es",
+      "cluster": "juan",
+      "relevant": [
+        {
+          "asset": "INTERVIEW_JUAN_03.mov",
+          "grade": 3
+        }
+      ]
+    },
+    {
+      "id": "habla-desierto",
+      "query": "grabamos en el desierto tres días",
+      "category": "dialogue",
+      "lang": "es",
+      "cluster": "marta",
+      "relevant": [
+        {
+          "asset": "INTERVIEW_MARTA_07.mov",
+          "grade": 3
+        }
+      ]
+    },
+    {
+      "id": "habla-cliente",
+      "query": "el cliente aprobó la campaña sin cambios",
+      "category": "dialogue",
+      "lang": "es",
+      "cluster": "marta",
+      "relevant": [
+        {
+          "asset": "INTERVIEW_MARTA_07.mov",
+          "grade": 3
+        }
+      ]
+    },
+    {
+      "id": "habla-luz",
+      "query": "la luz de la tarde en el acantilado",
+      "category": "dialogue",
+      "lang": "es",
+      "cluster": "marta",
+      "relevant": [
+        {
+          "asset": "INTERVIEW_MARTA_07.mov",
+          "grade": 3
+        },
+        {
+          "asset": "CLIFFS_0031.heic",
+          "grade": 1
+        }
+      ]
+    },
+    {
+      "id": "mixto-costa-presupuesto",
+      "query": "la entrevista frente a la costa donde hablan del presupuesto",
+      "category": "multimodal",
+      "lang": "es",
+      "cluster": "juan",
+      "relevant": [
+        {
+          "asset": "INTERVIEW_JUAN_03.mov",
+          "grade": 3
+        }
+      ]
+    },
+    {
+      "id": "mixto-desierto-cliente",
+      "query": "el video del desierto donde el cliente aprobó",
+      "category": "multimodal",
+      "lang": "es",
+      "cluster": "marta",
+      "relevant": [
+        {
+          "asset": "INTERVIEW_MARTA_07.mov",
+          "grade": 3
+        }
+      ]
+    },
+    {
+      "id": "meta-entrevistas",
+      "query": "entrevistas",
+      "category": "metadata",
+      "lang": "es",
+      "cluster": "folder",
+      "relevant": [
+        {
+          "asset": "INTERVIEW_JUAN_03.mov",
+          "grade": 2
+        },
+        {
+          "asset": "INTERVIEW_MARTA_07.mov",
+          "grade": 2
+        }
+      ]
+    },
+    {
+      "id": "meta-slate-file",
+      "query": "SLATE_A0045",
+      "category": "metadata",
+      "lang": "es",
+      "cluster": "filename",
+      "relevant": [
+        {
+          "asset": "SLATE_A0045.png",
+          "grade": 3
+        }
+      ]
+    },
+    {
+      "id": "meta-interview-file",
+      "query": "INTERVIEW_MARTA_07",
+      "category": "metadata",
+      "lang": "en",
+      "cluster": "filename",
+      "relevant": [
+        {
+          "asset": "INTERVIEW_MARTA_07.mov",
+          "grade": 3
+        }
+      ]
+    },
+    {
+      "id": "meta-carpeta-atardecer",
+      "query": "carpeta ATARDECER",
+      "category": "metadata",
+      "lang": "es",
+      "cluster": "folder",
+      "relevant": [
+        {
+          "asset": "SUNSET_0041.heic",
+          "grade": 2
+        },
+        {
+          "asset": "EVENING_0042.heic",
+          "grade": 2
+        },
+        {
+          "asset": "HORIZON_0043.heic",
+          "grade": 2
+        },
+        {
+          "asset": "SONOMA_0044.heic",
+          "grade": 2
+        }
+      ]
+    },
+    {
+      "id": "filtro-fotos-playa",
+      "query": "fotos de la playa",
+      "category": "filter-mediatype",
+      "lang": "es",
+      "cluster": "beach",
+      "relevant": [
+        {
+          "asset": "BEACH_0001.heic",
+          "grade": 3
+        },
+        {
+          "asset": "COAST_0002.heic",
+          "grade": 3
+        },
+        {
+          "asset": "SHORE_ROCKS_0003.heic",
+          "grade": 3
+        },
+        {
+          "asset": "WATERS_EDGE_0004.heic",
+          "grade": 3
+        },
+        {
+          "asset": "CATALINA_COAST_0005.heic",
+          "grade": 3
+        },
+        {
+          "asset": "CATALINA_SHORE_0006.heic",
+          "grade": 3
+        }
+      ]
+    },
+    {
+      "id": "filtro-videos",
+      "query": "videos de entrevista",
+      "category": "filter-mediatype",
+      "lang": "es",
+      "cluster": "juan",
+      "relevant": [
+        {
+          "asset": "INTERVIEW_JUAN_03.mov",
+          "grade": 3
+        },
+        {
+          "asset": "INTERVIEW_MARTA_07.mov",
+          "grade": 3
+        }
+      ]
+    },
+    {
+      "id": "neg-espagueti",
+      "query": "un plato de espagueti",
+      "category": "negative",
+      "lang": "es",
+      "expect": "empty"
+    },
+    {
+      "id": "neg-futbol",
+      "query": "un partido de futbol en un estadio lleno",
+      "category": "negative",
+      "lang": "es",
+      "expect": "empty"
+    },
+    {
+      "id": "neg-jirafa",
+      "query": "una jirafa en la cocina",
+      "category": "negative",
+      "lang": "es",
+      "expect": "empty"
+    },
+    {
+      "id": "neg-quirofano",
+      "query": "cirugía en un quirófano",
+      "category": "negative",
+      "lang": "es",
+      "expect": "empty"
+    },
+    {
+      "id": "neg-nieve",
+      "query": "muñeco de nieve con bufanda roja",
+      "category": "negative",
+      "lang": "es",
+      "expect": "empty"
+    },
+    {
+      "id": "neg-teclado",
+      "query": "un teclado mecánico sobre un escritorio",
+      "category": "negative",
+      "lang": "es",
+      "expect": "empty"
+    },
+    {
+      "id": "neg-boda",
+      "query": "los novios cortando el pastel de boda",
+      "category": "negative",
+      "lang": "es",
+      "expect": "empty"
+    },
+    {
+      "id": "neg-factura",
+      "query": "numero de factura 99999",
+      "category": "negative",
+      "lang": "es",
+      "expect": "empty"
+    }
+  ]
+}
