@@ -181,6 +181,37 @@ public struct Moment: Codable, Sendable, FetchableRecord, MutablePersistableReco
     }
 }
 
+/// One label the classifier put on one moment.
+public struct LabelRow: Codable, Sendable, FetchableRecord, MutablePersistableRecord {
+    public static let databaseTableName = "labels"
+
+    public var labelID: Int64?
+    public var momentID: Int64
+    public var assetID: Int64
+    public var identifier: String
+    public var confidence: Double
+    /// Which classifier produced it. Same rule as `embeddings.modelID`: a
+    /// taxonomy that improves should be re-derivable, not frozen.
+    public var source: String
+
+    public init(labelID: Int64? = nil, momentID: Int64, assetID: Int64,
+                identifier: String, confidence: Double, source: String) {
+        self.labelID = labelID
+        self.momentID = momentID
+        self.assetID = assetID
+        self.identifier = identifier
+        self.confidence = confidence
+        self.source = source
+    }
+
+    /// How the label reads in the text index. Vision's identifiers are
+    /// underscored — `printed_page`, `sports_equipment` — and nobody searches
+    /// that way.
+    public var searchableText: String {
+        identifier.replacingOccurrences(of: "_", with: " ")
+    }
+}
+
 public struct TranscriptChunk: Codable, Sendable, FetchableRecord, MutablePersistableRecord {
     public static let databaseTableName = "transcript_chunks"
 

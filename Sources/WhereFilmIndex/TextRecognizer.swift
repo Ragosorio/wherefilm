@@ -59,6 +59,14 @@ public struct TextRecognizer: Sendable {
         /// candidate at all is reason enough to look properly.
         public var screeningConfidence: Float = 0
         public var minimumLength = 2
+        /// Which languages to expect. Left nil, Vision detects per frame, which
+        /// is both slower and worse on the short bursts of text a slate or a
+        /// badge contains — there is not enough of it to detect a language from.
+        public var recognitionLanguages: [String]?
+        /// Words the recogniser should prefer over its language model's guesses:
+        /// the names, brands and slate vocabulary of one archive. "ALVAREZ" is a
+        /// surname, not a misspelling of "always".
+        public var customWords: [String] = []
 
         public init() {}
     }
@@ -104,7 +112,15 @@ public struct TextRecognizer: Sendable {
         var request = RecognizeTextRequest()
         request.recognitionLevel = level
         request.usesLanguageCorrection = languageCorrection
-        request.automaticallyDetectsLanguage = options.automaticallyDetectsLanguage
+        if let languages = options.recognitionLanguages, !languages.isEmpty {
+            request.recognitionLanguages = languages.map { Locale.Language(identifier: $0) }
+            request.automaticallyDetectsLanguage = false
+        } else {
+            request.automaticallyDetectsLanguage = options.automaticallyDetectsLanguage
+        }
+        if !options.customWords.isEmpty {
+            request.customWords = options.customWords
+        }
 
         let prepared = request
         let observations = try await VisionGate.shared.run {

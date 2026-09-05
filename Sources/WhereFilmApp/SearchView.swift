@@ -429,6 +429,7 @@ private struct ResultCard: View {
         case .visual: "La escena coincide con tu descripción"
         case .transcript(let text, _): "Se escucha: “\(text.prefix(92))”"
         case .onScreenText(let text): "Aparece escrito: “\(text.prefix(72))”"
+        case .sceneLabel(let text): "Se reconoce: \(text)"
         case .metadata(let text, _): "Coincide con: \(text.prefix(72))"
         }
     }
@@ -438,6 +439,7 @@ private struct ResultCard: View {
         case .visual: "eye"
         case .transcript: "waveform"
         case .onScreenText: "textformat"
+        case .sceneLabel: "tag"
         case .metadata: "folder"
         }
     }

@@ -73,6 +73,12 @@ struct Eval: AsyncParsableCommand {
     @Option(name: .long, help: "Standard deviations at which a visual hit is as good as it gets.")
     var zCeiling: Double?
 
+    @Option(name: .long, help: "How rare a scene label must be to count as evidence (0 disables the channel).")
+    var labelRarity: Double?
+
+    @Option(name: .long, help: "Weight of the scene-label channel.")
+    var labelWeight: Double?
+
     @Option(name: .long, help: "Cosine similarity treated as a perfect visual match.")
     var strongVisual: Float?
 
@@ -107,6 +113,8 @@ struct Eval: AsyncParsableCommand {
         options.weights.judgesVisualBySurprise = surprise
         if let zFloor { options.weights.visualZFloor = zFloor }
         if let zCeiling { options.weights.visualZCeiling = zCeiling }
+        if let labelRarity { options.weights.minimumLabelRarity = labelRarity }
+        if let labelWeight { options.weights.sceneLabel = labelWeight }
         if let strongVisual { options.weights.strongVisualSimilarity = strongVisual }
         let engine = SearchEngine(store: store, options: options)
         let planner = QueryPlanner(useFoundationModel: !noLLM,

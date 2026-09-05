@@ -10,6 +10,7 @@ let package = Package(
         .library(name: "WhereFilmIndex", targets: ["WhereFilmIndex"]),
         .library(name: "WhereFilmSearch", targets: ["WhereFilmSearch"]),
         .executable(name: "wherefilm", targets: ["WhereFilmCLI"]),
+        .executable(name: "wherefilm-vision-helper", targets: ["WhereFilmVisionHelper"]),
         .executable(name: "WhereFilmApp", targets: ["WhereFilmApp"]),
     ],
     dependencies: [
@@ -37,6 +38,10 @@ let package = Package(
             name: "WhereFilmSearch",
             dependencies: ["WhereFilmCore", "WhereFilmML"]
         ),
+        // Deliberately depends on nothing of ours: it is a disposable process
+        // that runs one Vision request and answers over a pipe, so it must not
+        // be able to grow a database, a model or an opinion.
+        .executableTarget(name: "WhereFilmVisionHelper"),
         .executableTarget(
             name: "WhereFilmCLI",
             dependencies: [

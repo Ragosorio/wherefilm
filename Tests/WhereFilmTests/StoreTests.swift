@@ -356,7 +356,8 @@ struct StoreTests {
         let assetID: Int64
         let momentID: Int64
         do {
-            let store = try IndexStore(url: url)
+            // Stopped at v1, exactly like the library this test was written from.
+            let store = try IndexStore(url: url, migrateUpTo: "v1")
             assetID = try seedAsset(store, key: "orphan:1", name: "ORPHAN.mov")
             let moment = try #require(try store.insertMoments([
                 Moment(assetID: assetID, startSeconds: 0, endSeconds: 4),
@@ -382,16 +383,6 @@ struct StoreTests {
                     """, arguments: [assetID])
                 try db.execute(sql: "DELETE FROM moments WHERE momentID = ?",
                                arguments: [momentID])
-                // Wind the schema back to exactly where the damaged library was
-                // stuck: everything `v1` created, and nothing after it.
-                try db.execute(sql: "DROP TABLE IF EXISTS analysis_state")
-                try db.execute(sql: "DROP TABLE IF EXISTS search_vocab")
-                try db.execute(sql: "DROP INDEX IF EXISTS idx_ocr_asset")
-                // Columns count as schema too: leaving these behind would let
-                // the test pass against a migration that could never run twice.
-                try db.execute(sql: "ALTER TABLE transcript_chunks DROP COLUMN engine")
-                try db.execute(sql: "ALTER TABLE ocr_texts DROP COLUMN engine")
-                try db.execute(sql: "DELETE FROM grdb_migrations WHERE identifier <> 'v1'")
                 try db.execute(sql: "PRAGMA foreign_keys = ON")
             }
         }

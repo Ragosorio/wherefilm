@@ -9,6 +9,7 @@ public enum Evidence: Sendable {
     case visual(similarity: Float, phrase: String)
     case transcript(text: String, seconds: Double)
     case onScreenText(text: String)
+    case sceneLabel(text: String)
     case metadata(text: String, kind: SearchTextKind)
 
     public var label: String {
@@ -18,6 +19,7 @@ public enum Evidence: Sendable {
         case .transcript(let text, let seconds):
             "dialogue · \(SearchResult.timecode(seconds)) · \"\(text.prefix(90))\""
         case .onScreenText(let text): "on-screen text · \"\(text.prefix(60))\""
+        case .sceneLabel(let text): "recognised · \(text)"
         case .metadata(let text, let kind): "\(kind.rawValue) · \(text.prefix(60))"
         }
     }
@@ -149,6 +151,11 @@ public struct SearchEngine: Sendable {
         public var visual = 0.45
         public var transcript = 0.35
         public var onScreenText = 0.12
+        /// Scene and object labels. Weighted between on-screen text and the
+        /// visual channel because that is what it is: a second, independent
+        /// opinion about what the frame shows, from a model that is better at
+        /// concrete nouns and much worse at everything else.
+        public var sceneLabel = 0.2
         public var metadata = 0.08
         /// RRF's damping constant. 60 is the value from the original paper and
         /// the industry default; smaller values make the top rank dominate more.
@@ -169,6 +176,12 @@ public struct SearchEngine: Sendable {
         public var visualTrust = 1.0
         public var transcriptTrust = 0.95
         public var onScreenTextTrust = 0.95
+        /// A classifier label is a good signal about a picture and a coarse one:
+        /// "dog" is right or wrong, with little in between, but its taxonomy is
+        /// far smaller than the things people search for.
+        public var sceneLabelTrust = 0.85
+        /// How rare a label must be, in this library, to count as evidence.
+        public var minimumLabelRarity = 0.35
         /// A filename match says something about the file, not about the frame.
         public var metadataTrust = 0.7
         /// The rank at which a text hit is worth half of a rank-1 hit.
@@ -390,7 +403,7 @@ public struct SearchEngine: Sendable {
     }
 
     private enum Channel: Hashable {
-        case visual, transcript, ocr, metadata
+        case visual, transcript, ocr, label, metadata
     }
 
     private func visualCandidates(plan: SearchPlan, vectorIndex: VectorIndex?) async throws -> [Candidate] {
@@ -509,7 +522,34 @@ public struct SearchEngine: Sendable {
     }
 
     private static let ocrKinds: [SearchTextKind] = [.ocr]
+    private static let labelKinds: [SearchTextKind] = [.label]
     private static let metadataKinds: [SearchTextKind] = [.filename, .folder, .metadata, .note]
+
+    /// Words that carry no meaning in a label lookup.
+    ///
+    /// The visual phrases are English by the time they reach here, and several
+    /// of them are caption templates this planner added itself — searching the
+    /// label index for "photo" would match nothing useful and cost a scan.
+    static let labelStopWords: Set<String> = [
+        "a", "an", "the", "of", "in", "on", "at", "with", "and", "or",
+        "photo", "picture", "image", "video", "frame", "shot", "scene", "view",
+    ]
+
+    /// The FTS pattern for the label channel, built from the English half of the
+    /// query rather than from the words the person typed.
+    ///
+    /// This is the point of the channel. Vision's taxonomy is English
+    /// (`duck`, `printed_page`), the transcript is Spanish, and the same query
+    /// has to reach both. The translation the visual channel already needed is
+    /// what makes "un pato amarillo" find a label that says "duck".
+    static func labelPattern(for phrases: [String], budget: PrefixBudget? = nil) -> String? {
+        var seen = Set<String>()
+        let words = phrases
+            .flatMap { Lexicon.fold($0).split(separator: " ").map(String.init) }
+            .filter { $0.count > 2 && !labelStopWords.contains($0) }
+            .filter { seen.insert($0).inserted }
+        return ftsPattern(for: words, budget: budget)
+    }
 
     private func textCandidates(plan: SearchPlan) throws -> [Candidate] {
         var candidates: [Candidate] = []
@@ -523,6 +563,16 @@ public struct SearchEngine: Sendable {
         // The transcript channel and the literal channels usually run the same
         // words. When they do, they are one MATCH and one bm25 pass, split three
         // ways — not three identical scans of the same index.
+        // Labels are matched against the *English* half of the query, because
+        // Vision's taxonomy is English and the person's words usually are not.
+        let labelPattern = Self.labelPattern(for: plan.visualPhrases, budget: breadth)
+        if let labelPattern {
+            let groups = try store.textSearch(
+                pattern: labelPattern, groups: [Self.labelKinds],
+                limitPerGroup: options.channelDepth)
+            candidates += labelCandidates(groups[0], phrases: plan.visualPhrases)
+        }
+
         if let literalPattern, literalPattern == spokenPattern {
             let groups = try store.textSearch(
                 pattern: literalPattern,
@@ -570,6 +620,52 @@ public struct SearchEngine: Sendable {
                                                       halfLife: options.weights.rankHalfLife),
                       evidence: .onScreenText(text: hit.text))
         }
+    }
+
+    private func labelCandidates(_ hits: [IndexStore.TextHit], phrases: [String]) -> [Candidate] {
+        // Coverage is measured the other way round here. A label is one or two
+        // words and the query is a sentence, so asking "how much of the query is
+        // in this label" would score every label near zero. The useful question
+        // is whether the label's own words appear in what was asked for.
+        let haystack = phrases.map { Lexicon.fold($0) }.joined(separator: " ")
+
+        // How much each matched label is worth *in this library*.
+        let identifiers = Array(Set(hits.map { $0.text.replacingOccurrences(of: " ", with: "_") }))
+        let frequencies = (try? store.labelFrequencies(identifiers: identifiers)) ?? ([:], 0)
+
+        return hits.enumerated().compactMap { position, hit in
+            let words = Lexicon.fold(hit.text).split(separator: " ").map(String.init)
+            let matched = words.filter { haystack.contains($0) }.count
+            guard matched > 0 else { return nil }
+            let coverage = Double(matched) / Double(max(words.count, 1))
+            let decay = 1 / (1 + Double(position) / max(options.weights.rankHalfLife, 1))
+            let identifier = hit.text.replacingOccurrences(of: " ", with: "_")
+            let rarity = Self.rarity(of: identifier, in: frequencies)
+            // A label the whole library shares is not evidence about any of it.
+            // Admitted at all, `sky` in a library of landscapes promotes thirty
+            // files equally and buries the one that matched on something real.
+            guard rarity >= options.weights.minimumLabelRarity else { return nil }
+            return Candidate(assetID: hit.assetID, momentID: hit.momentID,
+                             seconds: hit.startSeconds, endSeconds: hit.endSeconds,
+                             channel: .label, rank: position + 1, rawScore: hit.score,
+                             confidence: coverage * decay * rarity,
+                             evidence: .sceneLabel(text: hit.text))
+        }
+    }
+
+    /// Inverse document frequency, normalised to 0…1.
+    ///
+    /// A label on nearly every asset scores near zero and a label on a handful
+    /// scores near one, which is exactly the judgement bm25 makes for words and
+    /// this channel has to make for itself: the label index is queried by the
+    /// query's *English* half, so its ranking cannot borrow the text index's.
+    static func rarity(of identifier: String,
+                       in frequencies: (counts: [String: Int], assets: Int)) -> Double {
+        let total = frequencies.assets
+        guard total > 1 else { return 1 }
+        let count = max(1, frequencies.counts[identifier] ?? 1)
+        guard count < total else { return 0 }
+        return log(Double(total) / Double(count)) / log(Double(total))
     }
 
     private func metadataCandidates(_ hits: [IndexStore.TextHit], terms: [String]) -> [Candidate] {
@@ -757,6 +853,7 @@ public struct SearchEngine: Sendable {
         case .visual: options.weights.visual
         case .transcript: options.weights.transcript
         case .ocr: options.weights.onScreenText
+        case .label: options.weights.sceneLabel
         case .metadata: options.weights.metadata
         }
     }
@@ -766,6 +863,7 @@ public struct SearchEngine: Sendable {
         case .visual: options.weights.visualTrust
         case .transcript: options.weights.transcriptTrust
         case .ocr: options.weights.onScreenTextTrust
+        case .label: options.weights.sceneLabelTrust
         case .metadata: options.weights.metadataTrust
         }
     }

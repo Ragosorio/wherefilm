@@ -203,6 +203,35 @@ public enum Schema {
             }
         }
 
+        // Scene and object labels from Vision's own classifier.
+        //
+        // The cheapest recall in the product, and it was simply absent. The only
+        // thing that could answer "un pato amarillo" was MobileCLIP-S0, the
+        // smallest model in its family and weakest at exactly the concrete nouns
+        // people search by. `ClassifyImageRequest` answers from a taxonomy, on a
+        // frame that has already been decoded, and returns *text* — which means
+        // it lands in FTS5 next to the transcript and the on-screen text, and the
+        // query translator makes it work in Spanish without the visual model
+        // being involved at all.
+        migrator.registerMigration("v6-scene-labels") { db in
+            try db.create(table: "labels") { t in
+                t.autoIncrementedPrimaryKey("labelID")
+                t.column("momentID", .integer).notNull()
+                    .references("moments", onDelete: .cascade)
+                t.column("assetID", .integer).notNull()
+                    .references("assets", onDelete: .cascade)
+                t.column("identifier", .text).notNull()
+                t.column("confidence", .double).notNull()
+                t.column("source", .text).notNull()
+            }
+            try db.create(index: "idx_labels_moment", on: "labels", columns: ["momentID"])
+            try db.create(index: "idx_labels_asset", on: "labels", columns: ["assetID"])
+            // Ranking needs to know how common a label is before it can decide
+            // what one is worth. Without this index that question is a table scan
+            // on every search.
+            try db.create(index: "idx_labels_identifier", on: "labels", columns: ["identifier"])
+        }
+
         return migrator
     }
 }
@@ -216,4 +245,8 @@ public enum SearchTextKind: String, Sendable, CaseIterable {
     case folder
     case metadata
     case note
+    /// A scene or object label from Vision's classifier. Text, but describing
+    /// what the frame *is*, not what it says — so it is matched against the
+    /// English half of a query rather than the spoken half.
+    case label
 }

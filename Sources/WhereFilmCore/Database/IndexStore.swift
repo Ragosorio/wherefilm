@@ -9,7 +9,19 @@ import GRDB
 public final class IndexStore: Sendable {
     public let dbPool: DatabasePool
 
-    public init(url: URL) throws {
+    public convenience init(url: URL) throws {
+        try self.init(url: url, migrateUpTo: nil)
+    }
+
+    /// `migrateUpTo` exists for one test, and it earns its place.
+    ///
+    /// The regression it protects — a real library stuck at `v1` because
+    /// orphaned rows made every later migration fail — can only be reproduced by
+    /// a database that genuinely stopped at `v1`. Simulating that by hand meant
+    /// dropping each later table, index and column one by one, and every new
+    /// migration silently broke the test until somebody remembered to extend the
+    /// list. Stopping the migrator is the honest way to say "this library is old".
+    public init(url: URL, migrateUpTo: String?) throws {
         try FileManager.default.createDirectory(
             at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
 
@@ -35,7 +47,11 @@ public final class IndexStore: Sendable {
             try !migrator.hasCompletedMigrations(db)
         }
         if pending { try Self.repairOrphanedDerivedRows(dbPool) }
-        try migrator.migrate(dbPool)
+        if let migrateUpTo {
+            try migrator.migrate(dbPool, upTo: migrateUpTo)
+        } else {
+            try migrator.migrate(dbPool)
+        }
     }
 
     /// Drops derived rows whose parent moment is gone, before migrating.
@@ -356,8 +372,10 @@ public final class IndexStore: Sendable {
         _ = try dbPool.write { db in
             // FTS5 is not a foreign-key child of moments, so it must be cleaned
             // explicitly before a visual re-index creates replacement moments.
-            try db.execute(sql: "DELETE FROM search_index WHERE assetID = ? AND kind = ?",
-                           arguments: [assetID, SearchTextKind.ocr.rawValue])
+            for kind in [SearchTextKind.ocr, .label] {
+                try db.execute(sql: "DELETE FROM search_index WHERE assetID = ? AND kind = ?",
+                               arguments: [assetID, kind.rawValue])
+            }
             try Moment.filter(Column("assetID") == assetID).deleteAll(db)
         }
     }
@@ -506,6 +524,76 @@ public final class IndexStore: Sendable {
             _ = try TranscriptChunk.filter(Column("assetID") == assetID).deleteAll(db)
             try db.execute(sql: "DELETE FROM search_index WHERE assetID = ? AND kind = ?",
                            arguments: [assetID, SearchTextKind.transcript.rawValue])
+        }
+    }
+
+    /// Adds labels for moments that were just created, and indexes them for text
+    /// search. Used during a visual pass, where `deleteMoments` has already
+    /// removed the previous opinion.
+    public func insertLabels(_ labels: [LabelRow],
+                             momentTimes: [Int64: (Double, Double)]) throws {
+        guard !labels.isEmpty else { return }
+        try dbPool.write { db in
+            for label in labels {
+                var copy = label
+                try copy.insert(db)
+                let times = momentTimes[label.momentID] ?? (0, 0)
+                try Self.indexText(db, text: label.searchableText, assetID: label.assetID,
+                                   momentID: label.momentID, kind: .label,
+                                   start: times.0, end: times.1)
+            }
+        }
+    }
+
+    /// Replaces the labels for one asset and reindexes them for text search.
+    ///
+    /// Written as a replace rather than an insert for the same reason OCR is: a
+    /// re-analysis with a better classifier must not leave the old opinion lying
+    /// beside the new one, quietly matching queries twice.
+    public func replaceLabels(assetID: Int64, labels: [LabelRow],
+                              momentTimes: [Int64: (Double, Double)]) throws {
+        try dbPool.write { db in
+            _ = try LabelRow.filter(Column("assetID") == assetID).deleteAll(db)
+            try db.execute(sql: "DELETE FROM search_index WHERE assetID = ? AND kind = ?",
+                           arguments: [assetID, SearchTextKind.label.rawValue])
+            for label in labels {
+                var copy = label
+                try copy.insert(db)
+                let times = momentTimes[label.momentID] ?? (0, 0)
+                try Self.indexText(db, text: label.searchableText, assetID: label.assetID,
+                                   momentID: label.momentID, kind: .label,
+                                   start: times.0, end: times.1)
+            }
+        }
+    }
+
+    /// How many distinct assets carry each of these labels, and how many assets
+    /// there are in total.
+    ///
+    /// A classifier is generous with the obvious. On a library of landscapes it
+    /// puts `outdoor` and `sky` on most of the shelf, and a channel that treats
+    /// those like any other match will happily promote thirty files for
+    /// "nubes en el cielo" — measured, and it cost seven cases their rank. How
+    /// rare a label is *in this library* is the difference between a label that
+    /// identifies something and a label that describes the weather everywhere.
+    public func labelFrequencies(identifiers: [String]) throws -> (counts: [String: Int], assets: Int) {
+        guard !identifiers.isEmpty else { return ([:], 0) }
+        return try dbPool.read { db in
+            let total = try Int.fetchOne(db, sql: "SELECT count(*) FROM assets") ?? 0
+            var counts: [String: Int] = [:]
+            let rows = try Row.fetchAll(db, sql: """
+                SELECT identifier, count(DISTINCT assetID) AS n FROM labels
+                WHERE identifier IN (\(databaseQuestionMarks(count: identifiers.count)))
+                GROUP BY identifier
+                """, arguments: StatementArguments(identifiers))
+            for row in rows { counts[row["identifier"]] = row["n"] }
+            return (counts, total)
+        }
+    }
+
+    public func labelCount() throws -> Int {
+        try dbPool.read { db in
+            try Int.fetchOne(db, sql: "SELECT count(*) FROM labels") ?? 0
         }
     }
 

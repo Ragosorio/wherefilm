@@ -43,6 +43,7 @@ done
 }
 
 BUILT_BINARIES=()
+BUILT_HELPERS=()
 for architecture in $ARCHITECTURES; do
   case "$architecture" in
     arm64|x86_64) ;;
@@ -57,12 +58,28 @@ for architecture in $ARCHITECTURES; do
     --scratch-path "$scratch" \
     --product WhereFilmApp
 
+  # The Vision helper. Without it the app still works — it falls back to running
+  # Vision in-process behind the two-request gate — but it gives up the
+  # throughput the extra processes exist for, and Apple's OCR crash stops being
+  # contained.
+  swift build -c "$CONFIG" \
+    --triple "$triple" \
+    --scratch-path "$scratch" \
+    --product wherefilm-vision-helper
+
   binary="$scratch/$architecture-apple-macosx/$CONFIG/WhereFilmApp"
   [[ -f "$binary" ]] || {
     echo "Build produced no $architecture binary at $binary" >&2
     exit 1
   }
   BUILT_BINARIES+=("$binary")
+
+  helper="$scratch/$architecture-apple-macosx/$CONFIG/wherefilm-vision-helper"
+  [[ -f "$helper" ]] || {
+    echo "Build produced no $architecture Vision helper at $helper" >&2
+    exit 1
+  }
+  BUILT_HELPERS+=("$helper")
 done
 
 rm -rf "$APP"
@@ -73,8 +90,17 @@ else
   lipo -create "${BUILT_BINARIES[@]}" -output "$APP/Contents/MacOS/WhereFilm"
 fi
 
+mkdir -p "$APP/Contents/Helpers"
+if [[ ${#BUILT_HELPERS[@]} -eq 1 ]]; then
+  cp "${BUILT_HELPERS[0]}" "$APP/Contents/Helpers/wherefilm-vision-helper"
+else
+  lipo -create "${BUILT_HELPERS[@]}" -output "$APP/Contents/Helpers/wherefilm-vision-helper"
+fi
+chmod +x "$APP/Contents/Helpers/wherefilm-vision-helper"
+
 for architecture in $ARCHITECTURES; do
   lipo "$APP/Contents/MacOS/WhereFilm" -verify_arch "$architecture"
+  lipo "$APP/Contents/Helpers/wherefilm-vision-helper" -verify_arch "$architecture"
 done
 cp "Brand/WhereFilm.icns" "$APP/Contents/Resources/WhereFilm.icns"
 mkdir -p "$APP/Contents/Resources/Models" "$APP/Contents/Resources/Licenses"

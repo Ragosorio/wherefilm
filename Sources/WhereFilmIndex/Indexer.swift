@@ -28,6 +28,15 @@ public actor Indexer {
         public var variant: MobileCLIPVariant = .s0
         public var sampler = KeyframeSampler.Options()
         public var recognizeText = true
+        /// Ask Vision's classifier what the frame *is*. Nearly free next to OCR,
+        /// and it answers the concrete nouns the smallest CLIP variant is worst
+        /// at.
+        public var classifyScene = true
+        /// Languages the text recogniser should expect, and vocabulary it should
+        /// prefer. Both nil/empty by default: an archive's own names are the
+        /// caller's to supply.
+        public var recognitionLanguages: [String]?
+        public var customWords: [String] = []
         /// Run the cheap `.fast` screening pass on video keyframes before paying
         /// for `.accurate`. Measured to cost more recall than it saves time.
         public var screenVideoText = false
@@ -376,20 +385,27 @@ public actor Indexer {
         try store.addLevels(.visual, to: assetID)
         _ = try? previews.enforceBudget()
 
-        return totals.ocr > 0
-            ? "\(totals.moments) moments, \(totals.ocr) with on-screen text"
-            : "\(totals.moments) moments"
+        var detail = "\(totals.moments) moments"
+        if totals.ocr > 0 { detail += ", \(totals.ocr) with on-screen text" }
+        if totals.labels > 0 { detail += ", \(totals.labels) labels" }
+        return detail
     }
 
     struct CommitTotals {
         var moments = 0
         var ocr = 0
+        var labels = 0
 
         static func += (lhs: inout CommitTotals, rhs: CommitTotals) {
             lhs.moments += rhs.moments
             lhs.ocr += rhs.ocr
+            lhs.labels += rhs.labels
         }
     }
+
+    /// Recorded with every label, so a future taxonomy can be told apart from
+    /// this one instead of silently mixed with it.
+    static let sceneClassifierID = "vision-classify-v2"
 
     /// Writes one batch of keyframes: moments, embeddings, ANN entries, previews
     /// and on-screen text — all from images that were decoded exactly once.
@@ -439,24 +455,45 @@ public actor Indexer {
         // and it catches signs, badges, slates and screens that CLIP reliably
         // misses. The whole batch goes at once — one frame at a time left the
         // machine idle waiting on Vision.
-        if options.recognizeText {
-            var textOptions = TextRecognizer.Options()
-            textOptions.screensFirst = screenText
-            let recognized = await TextRecognizer(options: textOptions)
-                .recognize(batch: frames.map(\.image))
-            var rows: [OCRText] = []
+        if options.recognizeText || options.classifyScene {
+            // One pass over the frames answers every question about them. When
+            // helpers are available this is also one process hop per frame
+            // instead of three, because moving the frame is the expensive part.
+            var analyzerOptions = FrameAnalyzer.Options()
+            analyzerOptions.recognizesText = options.recognizeText
+            analyzerOptions.classifiesScene = options.classifyScene
+            analyzerOptions.screensFirst = screenText
+            analyzerOptions.recognitionLanguages = options.recognitionLanguages
+            analyzerOptions.customWords = options.customWords
+            let analyses = await FrameAnalyzer(options: analyzerOptions)
+                .analyze(batch: frames.map(\.image))
+
+            var ocrRows: [OCRText] = []
+            var labelRows: [LabelRow] = []
             var times: [Int64: (Double, Double)] = [:]
             for (index, moment) in moments.enumerated() {
-                guard let momentID = moment.momentID,
-                      index < recognized.count,
-                      let hit = recognized[index] else { continue }
-                rows.append(OCRText(momentID: momentID, assetID: assetID,
-                                    text: hit.text, confidence: hit.confidence))
+                guard let momentID = moment.momentID, index < analyses.count else { continue }
+                let analysis = analyses[index]
+                guard !analysis.isEmpty else { continue }
                 times[momentID] = (moment.startSeconds, moment.endSeconds)
+                if let hit = analysis.text {
+                    ocrRows.append(OCRText(momentID: momentID, assetID: assetID,
+                                           text: hit.text, confidence: hit.confidence))
+                }
+                for label in analysis.labels where label.confidence >= Double(analyzerOptions.minimumLabelConfidence) {
+                    labelRows.append(LabelRow(momentID: momentID, assetID: assetID,
+                                              identifier: label.identifier,
+                                              confidence: label.confidence,
+                                              source: Self.sceneClassifierID))
+                }
             }
-            if !rows.isEmpty {
-                try store.insertOCR(rows, momentTimes: times)
-                totals.ocr = rows.count
+            if !ocrRows.isEmpty {
+                try store.insertOCR(ocrRows, momentTimes: times)
+                totals.ocr = ocrRows.count
+            }
+            if !labelRows.isEmpty {
+                try store.insertLabels(labelRows, momentTimes: times)
+                totals.labels = labelRows.count
             }
         }
         return totals
