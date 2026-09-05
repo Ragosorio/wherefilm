@@ -22,6 +22,7 @@ public struct SearchPlan: Sendable {
 
     public enum PlanSource: String, Sendable {
         case foundationModel = "Apple on-device model"
+        case systemTranslation = "system translation"
         case lexicon = "built-in lexicon"
         case literal = "literal query"
     }
@@ -33,21 +34,52 @@ public struct SearchPlan: Sendable {
 /// Turns "el chavo de playera azul que habló del presupuesto" into something the
 /// indexes can answer.
 ///
-/// Three tiers, each degrading cleanly into the next, because Apple Intelligence
+/// Four tiers, each degrading cleanly into the next, because Apple Intelligence
 /// is not on every Mac and the product must not require it:
 ///
 ///  1. The on-device Foundation Model, with structured output.
-///  2. A built-in Spanish→English lexicon of audiovisual vocabulary.
-///  3. The query as typed.
+///  2. The system translator — offline, unlimited vocabulary, and present on
+///     Macs that have no Apple Intelligence at all, which is the entire Intel
+///     line.
+///  3. A built-in Spanish→English lexicon of audiovisual jargon.
+///  4. The query as typed.
+///
+/// Tier 2 is new, and it is the one that matters on hardware without a neural
+/// engine: before it, an Intel Mac fell straight from "no language model" to a
+/// three-hundred-word dictionary.
 ///
 /// The LLM never touches the indexing hot path. It runs once, per search, for a
 /// few hundred milliseconds — which is exactly where a language model earns its
 /// keep without becoming the heart of the system.
 public struct QueryPlanner: Sendable {
     public var useFoundationModel: Bool
+    /// Whether to wrap each visual phrase in the caption-shaped templates CLIP
+    /// was trained on and average the results.
+    public var usesPromptTemplates: Bool
+    /// Whether the system translator may answer. Off only for measurement.
+    public var useSystemTranslation: Bool
 
-    public init(useFoundationModel: Bool = true) {
+    public init(useFoundationModel: Bool = true,
+                useSystemTranslation: Bool = true,
+                usesPromptTemplates: Bool = true) {
         self.useFoundationModel = useFoundationModel
+        self.useSystemTranslation = useSystemTranslation
+        self.usesPromptTemplates = usesPromptTemplates
+    }
+
+    /// CLIP was trained on captions, not on search queries, so a bare noun
+    /// phrase sits slightly off the distribution its text encoder knows. Wrapping
+    /// the phrase in caption-shaped templates and averaging the embeddings is the
+    /// standard, nearly free correction — the original CLIP work reports a few
+    /// points of zero-shot accuracy from exactly this, and the encoder here is
+    /// already built to average several phrasings.
+    ///
+    /// Deliberately three, not eighty: each one costs a text encode, and the
+    /// gain flattens quickly.
+    static func templated(_ phrase: String) -> [String] {
+        let cleaned = phrase.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleaned.isEmpty else { return [] }
+        return [cleaned, "a photo of \(cleaned)", "a video frame of \(cleaned)"]
     }
 
     public static var foundationModelAvailable: Bool {
@@ -97,7 +129,48 @@ public struct QueryPlanner: Sendable {
            let plan = try? await planWithFoundationModel(trimmed) {
             return plan
         }
+        if useSystemTranslation, let plan = await translatedPlan(trimmed) {
+            return plan
+        }
         return lexiconPlan(trimmed)
+    }
+
+    // MARK: - Tier 2
+
+    /// Translates the visual half with the system translator.
+    ///
+    /// Returns nil — falling through to the lexicon — whenever translating would
+    /// be pointless or impossible: an English query, a query made only of slate
+    /// codes, or a Mac without the language pair installed.
+    private func translatedPlan(_ query: String) async -> SearchPlan? {
+        guard Self.hasDescribableContent(query) else { return nil }
+        guard let language = NLLanguageRecognizer.dominantLanguage(for: query)
+                ?? (Lexicon.looksSpanish(query) ? .spanish : nil),
+              language != .english else { return nil }
+
+        let source = Locale.Language(identifier: language.rawValue)
+        guard let translated = await SystemTranslator.shared.translate(query, from: source)
+        else { return nil }
+
+        var visualPhrases = usesPromptTemplates ? Self.templated(translated) : [translated]
+        // The jargon override. A general translator turns "plano cerrado" into
+        // "closed shot"; the lexicon knows it is a close-up, and film vocabulary
+        // is exactly where a general model has no reason to be right.
+        let jargon = Lexicon.translateVisual(query)
+        if !jargon.isEmpty, jargon.caseInsensitiveCompare(translated) != .orderedSame {
+            visualPhrases.append(jargon)
+        }
+
+        let terms = Self.literalTerms(from: query)
+        return SearchPlan(
+            rawQuery: query,
+            visualPhrases: visualPhrases,
+            // Never translated: the transcript is in the language that was spoken.
+            spokenTerms: terms,
+            literalTerms: terms,
+            mediaType: QueryFilters.mediaType(in: query),
+            dateRange: QueryFilters.dateRange(in: query),
+            source: .systemTranslation)
     }
 
     /// Whether the query says anything a model could turn into a scene.
@@ -167,6 +240,17 @@ public struct QueryPlanner: Sendable {
         // Deduplicate without reordering: the first phrase is the model's best.
         var seen = Set<String>()
         visualPhrases = visualPhrases.filter { seen.insert($0.lowercased()).inserted }
+        // Templates are deliberately *not* applied here, and that is measured.
+        // The model already answers with a caption-shaped English sentence, so
+        // wrapping it again dilutes the ensemble with generic phrasings that
+        // match everything a little. Over the 58-case set:
+        //
+        //     model plan, no templates   nDCG 0.850   false positives 25%
+        //     model plan, templated      nDCG 0.831   false positives 50%
+        //
+        // On the translated tier the same templates help, because a translator
+        // returns a bare phrase rather than a caption. Same technique, opposite
+        // sign, depending on what produced the phrase.
 
         let literalTerms = Self.literalTerms(from: query)
         // The model's spoken terms are treated as *additions*, never as a
@@ -183,13 +267,22 @@ public struct QueryPlanner: Sendable {
             spokenTerms.append(cleaned)
         }
 
+        // The model's `mediaType` is deliberately discarded.
+        //
+        // It answers this field on nearly every query, including queries that
+        // say nothing about a kind of file, and these two fields are the only
+        // ones in the plan that are *hard filters*: a wrong visual phrase costs
+        // some ranking, while a wrong media type empties the result list. So
+        // the filters come from words that can only mean one thing, and the
+        // model gets no vote. Same rule as the spoken terms: the model may
+        // improve a search, never break one.
         return SearchPlan(
             rawQuery: query,
             visualPhrases: visualPhrases,
             spokenTerms: spokenTerms,
             literalTerms: literalTerms,
-            mediaType: MediaType(rawValue: plan.mediaType.lowercased()),
-            dateRange: nil,
+            mediaType: QueryFilters.mediaType(in: query),
+            dateRange: QueryFilters.dateRange(in: query),
             source: .foundationModel)
     }
 
@@ -225,8 +318,8 @@ public struct QueryPlanner: Sendable {
             visualPhrases: visualPhrases,
             spokenTerms: terms,
             literalTerms: terms,
-            mediaType: nil,
-            dateRange: nil,
+            mediaType: QueryFilters.mediaType(in: query),
+            dateRange: QueryFilters.dateRange(in: query),
             source: isSpanish ? .lexicon : .literal)
     }
 

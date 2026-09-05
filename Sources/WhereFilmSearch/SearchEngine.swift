@@ -134,12 +134,58 @@ public struct SearchUpdate: Sendable {
 /// it costs a fraction of asking a large video model to watch thirty minutes.
 public struct SearchEngine: Sendable {
     public struct Weights: Sendable {
+        // MARK: Ordering — weighted reciprocal rank fusion
+        //
+        // These are RRF weights now, not score multipliers. The previous scheme
+        // normalised each channel min-to-max *inside one result set*, which had
+        // a defect that is obvious once written down: a channel holding a single
+        // candidate has no spread, so that candidate scored 1.0 — a perfect mark
+        // for being the only thing there. One stray OCR line could outrank a
+        // genuine visual match.
+        //
+        // Rank fusion has no such failure mode, needs no comparability between
+        // bm25 and cosine, and is one line: sum w/(k+rank) over the channels a
+        // result appears in. Cormack, Clarke & Büttcher, SIGIR 2009.
         public var visual = 0.45
         public var transcript = 0.35
         public var onScreenText = 0.12
         public var metadata = 0.08
-        /// Added when two different channels agree inside `temporalWindow`.
-        public var agreementBonus = 0.35
+        /// RRF's damping constant. 60 is the value from the original paper and
+        /// the industry default; smaller values make the top rank dominate more.
+        public var rrfK: Double = 60
+
+        // MARK: Confidence — what the interface is allowed to claim
+        //
+        // Deliberately a *separate* number from the ordering score. Ordering
+        // asks "which of these is best?"; confidence asks "is any of this any
+        // good?", and answering the second with the first is what produced a
+        // calibration table where the 80–89% bucket was right a third of the
+        // time.
+        //
+        // Channels combine as a noisy-OR: 1 − ∏(1 − trust·confidence). Two
+        // independent signals agreeing raise it, nothing can push it past 1, and
+        // the old `agreementBonus` — which was added *outside* the normalising
+        // ceiling and so let two mediocre signals display 100% — is gone.
+        public var visualTrust = 1.0
+        public var transcriptTrust = 0.95
+        public var onScreenTextTrust = 0.95
+        /// A filename match says something about the file, not about the frame.
+        public var metadataTrust = 0.7
+        /// The rank at which a text hit is worth half of a rank-1 hit.
+        public var rankHalfLife: Double = 10
+        /// Judge a visual hit by how *unusual* it is for this query rather than
+        /// by raw cosine.
+        ///
+        /// A fixed cosine floor assumes every query starts from the same place,
+        /// and CLIP's modality gap says otherwise: a query that resembles
+        /// nothing in particular can still resemble *everything* slightly, which
+        /// is how a landscape library answers "un plato de espagueti" at all.
+        public var judgesVisualBySurprise = false
+        /// Standard deviations above this query's mean similarity below which a
+        /// hit is noise. Only used when `judgesVisualBySurprise` is on.
+        public var visualZFloor: Double = 3
+        /// Standard deviations at which a hit is as good as it gets.
+        public var visualZCeiling: Double = 6
         /// How close in time two signals must be to count as the same moment.
         public var temporalWindow: Double = 30
         /// Overrides the model's own similarity calibration. Normally nil: the
@@ -155,8 +201,25 @@ public struct SearchEngine: Sendable {
         public init() {}
     }
 
+    /// How the final list is ordered.
+    ///
+    /// This is a knob because the right answer was not obvious and had to be
+    /// measured — see the table in `docs/`. Rank fusion is the textbook choice
+    /// and it is genuinely better at *combining* channels; absolute confidence
+    /// is better at *separating* a good answer from a mediocre one, which is
+    /// most of what a small, precise library needs.
+    public enum Ranking: String, Sendable, CaseIterable {
+        /// Weighted reciprocal rank fusion alone.
+        case rankFusion
+        /// The calibrated noisy-OR confidence alone.
+        case confidence
+        /// Confidence first, rank fusion as the tiebreaker and nudge.
+        case blend
+    }
+
     public struct Options: Sendable {
         public var limit = 20
+        public var ranking: Ranking = .confidence
         /// How deep to look in each channel before fusing. Wider than `limit`,
         /// because a result that wins on agreement may be mid-pack in both
         /// channels individually.
@@ -211,12 +274,39 @@ public struct SearchEngine: Sendable {
         let text = try textCandidates(plan: plan)
         let visual = try await visualCandidates(plan: plan, vectorIndex: vectorIndex)
         try Task.checkCancellation()
-        return try build(results: fuse(text + visual))
+        return try build(results: fuse(eligible(text + visual, plan: plan)))
     }
 
     /// The part of search that never needs Core ML or the vector index.
     public func searchFast(plan: SearchPlan) throws -> [SearchResult] {
-        try build(results: fuse(textCandidates(plan: plan)))
+        try build(results: fuse(eligible(textCandidates(plan: plan), plan: plan)))
+    }
+
+    /// Applies the hard filters the planner has always produced and nobody has
+    /// ever read.
+    ///
+    /// `mediaType` and `dateRange` have been on `SearchPlan` since the first
+    /// version and were dropped on the floor: "fotos de la boda" searched video
+    /// just as happily, and a date narrowed nothing. They are applied here, at
+    /// the last possible moment, because these are the only two parts of a plan
+    /// that can *remove* a correct answer rather than merely rank it badly —
+    /// which is also why `QueryFilters` only sets them from words that cannot
+    /// mean anything else.
+    private func eligible(_ candidates: [Candidate], plan: SearchPlan) -> [Candidate] {
+        guard plan.mediaType != nil || plan.dateRange != nil, !candidates.isEmpty
+        else { return candidates }
+        let ids = Array(Set(candidates.map(\.assetID)))
+        guard let assets = try? store.assets(ids: ids) else { return candidates }
+        return candidates.filter { candidate in
+            guard let asset = assets[candidate.assetID] else { return false }
+            if let mediaType = plan.mediaType, asset.mediaType != mediaType { return false }
+            if let range = plan.dateRange {
+                // A file with no known date is not evidence against itself; it is
+                // simply not eligible for a question about dates.
+                guard let created = asset.createdAt, range.contains(created) else { return false }
+            }
+            return true
+        }
     }
 
     /// Publishes useful text/metadata matches first and a fully fused ranking
@@ -232,7 +322,7 @@ public struct SearchEngine: Sendable {
                 var mark = DispatchTime.now()
                 do {
                     try Task.checkCancellation()
-                    let text = try textCandidates(plan: plan)
+                    let text = eligible(try textCandidates(plan: plan), plan: plan)
                     timings.record("text", since: mark); mark = DispatchTime.now()
                     let fused = fuse(text)
                     timings.record("fuse", since: mark); mark = DispatchTime.now()
@@ -254,8 +344,10 @@ public struct SearchEngine: Sendable {
                         return
                     }
 
-                    let visual = try await visualCandidates(
-                        plan: plan, vectorIndex: vectorIndex, timings: &timings)
+                    let visual = eligible(
+                        try await visualCandidates(
+                            plan: plan, vectorIndex: vectorIndex, timings: &timings),
+                        plan: plan)
                     mark = DispatchTime.now()
                     try Task.checkCancellation()
                     let refinedFusion = fuse(text + visual)
@@ -287,7 +379,13 @@ public struct SearchEngine: Sendable {
         var seconds: Double
         var endSeconds: Double
         var channel: Channel
+        /// Position within its own channel, 1-based. This is what fusion orders
+        /// by; the raw score is kept only for explanation.
+        var rank: Int
         var rawScore: Double
+        /// How much this single channel believes its own answer, 0…1, on an
+        /// absolute scale that means the same thing for every query.
+        var confidence: Double
         var evidence: Evidence
     }
 
@@ -322,6 +420,13 @@ public struct SearchEngine: Sendable {
         guard !query.isEmpty else { return [] }
         try Task.checkCancellation()
 
+        // What this query looks like against the whole library, if the
+        // distribution-aware floor is on.
+        let profile = options.weights.judgesVisualBySurprise
+            ? await LibraryProfile.shared.statistics(
+                store: store, modelID: options.variant.modelID, query: query)
+            : nil
+
         let hits: [VectorIndex.Hit]
         if let vectorIndex, await vectorIndex.count > 0 {
             hits = try await vectorIndex.search(query, limit: options.channelDepth)
@@ -334,16 +439,71 @@ public struct SearchEngine: Sendable {
         }
 
         timings.record("ann", since: mark); mark = DispatchTime.now()
-        let usable = hits.filter { $0.similarity >= visualFloor }
+
+        // What counts as a good visual match, and why it is a z-score.
+        //
+        // Cosine is absolute for a given model, which is why the first version
+        // used a fixed floor of 0.14 — and that was right about the principle
+        // and wrong about the statistic. A query's similarities to a library
+        // have their own centre and their own spread, and "0.19" means something
+        // completely different in each. Measured here: "cirugía en un quirófano"
+        // reached cos 0.207 against a frame of rendered text, comfortably above
+        // a floor tuned so that real answers survive.
+        //
+        // Surprise is the right unit: how many standard deviations above this
+        // query's own average similarity a hit sits. A real query has a tail; a
+        // nonsense query has a bump exactly where its average is.
+        //
+        // Only the query side is normalised, and that is a measurement, not an
+        // oversight.
+        //
+        // The mirror problem is real: some moments resemble every query. On this
+        // fixture a frame of rendered text answered "cirugía en un quirófano" at
+        // cos 0.207 and "un plato de espagueti" at 0.187 — CLIP is famously
+        // drawn to pictures of writing, and an archive of slates and documents
+        // is full of such magnets. The textbook answer is to centre both sides,
+        // `cos(q,v) − q·c − v·c + c·c`, so a moment close to everything loses
+        // the advantage it gets for free.
+        //
+        // It was implemented, measured, and thrown away. Over 50 positive cases:
+        //
+        //     query-centred only   Recall@10 87%   MRR 0.855   nDCG 0.839
+        //     both sides centred   Recall@10 83%   MRR 0.412   nDCG 0.535
+        //
+        // Subtracting a moment's own baseline does not only demote the magnets;
+        // it *promotes* whatever sits furthest from the library's centre, which
+        // in a library of landscapes is the abstract wallpaper nobody asked for.
+        // The correction is symmetric and the problem is not.
+
+        /// Where a hit sits on whichever scale is in force: standard deviations
+        /// above this query's mean, or raw cosine when there is no profile.
+        func surprise(_ hit: VectorIndex.Hit) -> Double {
+            profile.map { $0.zScore(hit.similarity) } ?? Double(hit.similarity)
+        }
+        let entryFloor = profile == nil ? Double(visualFloor) : options.weights.visualZFloor
+        let entryCeiling = profile == nil ? Double(visualCeiling) : options.weights.visualZCeiling
+
+        let usable = hits.filter { surprise($0) >= entryFloor }
         let moments = try store.moments(ids: usable.map(\.momentID))
         timings.record("moments", since: mark)
-        let phrase = plan.visualPhrases.first ?? plan.rawQuery
-        return usable.compactMap { hit in
+        // Every phrase, not just the first. The vector actually searched with is
+        // the *average* of the ensemble, so naming one phrase as the reason was
+        // a small lie in the one place the product promises not to tell them.
+        let phrase = plan.visualPhrases.isEmpty
+            ? plan.rawQuery
+            : plan.visualPhrases.joined(separator: " / ")
+        return usable.enumerated().compactMap { position, hit in
             guard let moment = moments[hit.momentID] else { return nil }
+            // Cosine is already an absolute scale for a given model, so the
+            // channel's own confidence needs no result set to be computed
+            // against — which is exactly why it survives a query that matched
+            // nothing well.
+            let calibrated = (surprise(hit) - entryFloor) / max(entryCeiling - entryFloor, 1e-6)
             return Candidate(
                 assetID: moment.assetID, momentID: hit.momentID,
                 seconds: moment.startSeconds, endSeconds: moment.endSeconds,
-                channel: .visual, rawScore: Double(hit.similarity),
+                channel: .visual, rank: position + 1, rawScore: Double(hit.similarity),
+                confidence: min(1, max(0, calibrated)),
                 evidence: .visual(similarity: hit.similarity, phrase: phrase))
         }
     }
@@ -368,9 +528,9 @@ public struct SearchEngine: Sendable {
                 pattern: literalPattern,
                 groups: [[.transcript], Self.ocrKinds, Self.metadataKinds],
                 limitPerGroup: options.channelDepth)
-            candidates += transcriptCandidates(groups[0])
-            candidates += ocrCandidates(groups[1])
-            candidates += metadataCandidates(groups[2])
+            candidates += transcriptCandidates(groups[0], terms: plan.spokenTerms)
+            candidates += ocrCandidates(groups[1], terms: plan.literalTerms)
+            candidates += metadataCandidates(groups[2], terms: plan.literalTerms)
             return candidates
         }
 
@@ -378,43 +538,81 @@ public struct SearchEngine: Sendable {
             let groups = try store.textSearch(
                 pattern: spokenPattern, groups: [[.transcript]],
                 limitPerGroup: options.channelDepth)
-            candidates += transcriptCandidates(groups[0])
+            candidates += transcriptCandidates(groups[0], terms: plan.spokenTerms)
         }
         if let literalPattern {
             let groups = try store.textSearch(
                 pattern: literalPattern, groups: [Self.ocrKinds, Self.metadataKinds],
                 limitPerGroup: options.channelDepth)
-            candidates += ocrCandidates(groups[0])
-            candidates += metadataCandidates(groups[1])
+            candidates += ocrCandidates(groups[0], terms: plan.literalTerms)
+            candidates += metadataCandidates(groups[1], terms: plan.literalTerms)
         }
         return candidates
     }
 
-    private func transcriptCandidates(_ hits: [IndexStore.TextHit]) -> [Candidate] {
-        hits.map { hit in
+    private func transcriptCandidates(_ hits: [IndexStore.TextHit], terms: [String]) -> [Candidate] {
+        hits.enumerated().map { position, hit in
             Candidate(assetID: hit.assetID, momentID: nil,
                       seconds: hit.startSeconds, endSeconds: hit.endSeconds,
-                      channel: .transcript, rawScore: hit.score,
+                      channel: .transcript, rank: position + 1, rawScore: hit.score,
+                      confidence: Self.textConfidence(hit: hit, position: position, terms: terms,
+                                                      halfLife: options.weights.rankHalfLife),
                       evidence: .transcript(text: hit.text, seconds: hit.startSeconds))
         }
     }
 
-    private func ocrCandidates(_ hits: [IndexStore.TextHit]) -> [Candidate] {
-        hits.map { hit in
+    private func ocrCandidates(_ hits: [IndexStore.TextHit], terms: [String]) -> [Candidate] {
+        hits.enumerated().map { position, hit in
             Candidate(assetID: hit.assetID, momentID: hit.momentID,
                       seconds: hit.startSeconds, endSeconds: hit.endSeconds,
-                      channel: .ocr, rawScore: hit.score,
+                      channel: .ocr, rank: position + 1, rawScore: hit.score,
+                      confidence: Self.textConfidence(hit: hit, position: position, terms: terms,
+                                                      halfLife: options.weights.rankHalfLife),
                       evidence: .onScreenText(text: hit.text))
         }
     }
 
-    private func metadataCandidates(_ hits: [IndexStore.TextHit]) -> [Candidate] {
-        hits.map { hit in
+    private func metadataCandidates(_ hits: [IndexStore.TextHit], terms: [String]) -> [Candidate] {
+        hits.enumerated().map { position, hit in
             Candidate(assetID: hit.assetID, momentID: nil,
                       seconds: 0, endSeconds: 0,
-                      channel: .metadata, rawScore: hit.score,
+                      channel: .metadata, rank: position + 1, rawScore: hit.score,
+                      confidence: Self.textConfidence(hit: hit, position: position, terms: terms,
+                                                      halfLife: options.weights.rankHalfLife),
                       evidence: .metadata(text: hit.text, kind: hit.kind))
         }
+    }
+
+    /// How much a text channel should believe its own hit.
+    ///
+    /// bm25 is not an absolute scale — its value depends on the corpus, so the
+    /// only thing it supports is ordering. Two things about a hit *are*
+    /// absolute, though, and together they are enough:
+    ///
+    ///   **coverage** — how many of the query's words this text actually
+    ///   contains. The MATCH expression is an OR, so one word out of six is a
+    ///   legitimate match and a poor answer. This is what stops "numero de
+    ///   factura 99999" from confidently returning whatever contained *numero*.
+    ///
+    ///   **rank decay** — being the fiftieth-best match for a word is weaker
+    ///   evidence than being the first.
+    static func textConfidence(hit: IndexStore.TextHit, position: Int,
+                               terms: [String], halfLife: Double) -> Double {
+        let decay = 1 / (1 + Double(position) / max(halfLife, 1))
+        return termCoverage(text: hit.text, terms: terms) * decay
+    }
+
+    /// The fraction of the query's terms this text really contains.
+    ///
+    /// Folded on both sides, so accents and case cannot cause a false miss, and
+    /// prefix-tolerant by construction: the FTS pattern searches `presupuest*`,
+    /// and the stored word contains that prefix.
+    static func termCoverage(text: String, terms: [String]) -> Double {
+        let usable = terms.filter { $0.count >= 2 }
+        guard !usable.isEmpty else { return 1 }
+        let haystack = Lexicon.fold(text)
+        let matched = usable.filter { haystack.contains(Lexicon.fold($0)) }.count
+        return Double(matched) / Double(usable.count)
     }
 
     /// Decides, per term, whether a prefix wildcard is affordable.
@@ -477,48 +675,25 @@ public struct SearchEngine: Sendable {
         var momentID: Int64?
         var start: Double
         var end: Double
-        var channelScores: [Channel: Double] = [:]
+        /// Best (lowest) rank this result reached in each channel.
+        var channelRanks: [Channel: Int] = [:]
+        /// Each channel's own absolute belief in this result.
+        var channelConfidence: [Channel: Double] = [:]
         var evidence: [Evidence] = []
     }
 
     private func fuse(_ candidates: [Candidate]) -> [FusedCandidate] {
         guard !candidates.isEmpty else { return [] }
 
-        // Normalise each channel to 0…1 on its own scale. bm25 and cosine
-        // similarity are not comparable numbers; their *rankings* are.
-        var bounds: [Channel: (min: Double, max: Double)] = [:]
-        for candidate in candidates {
-            let current = bounds[candidate.channel] ?? (candidate.rawScore, candidate.rawScore)
-            bounds[candidate.channel] = (min(current.min, candidate.rawScore),
-                                         max(current.max, candidate.rawScore))
-        }
-
-        func normalize(_ candidate: Candidate) -> Double {
-            // Visual scores are already absolute and comparable across queries,
-            // so they get calibrated rather than rank-normalised. Text channels
-            // use bm25, whose raw value means nothing on its own — only its
-            // ordering within this result set does.
-            if candidate.channel == .visual {
-                let floor = Double(visualFloor)
-                let ceiling = Double(visualCeiling)
-                return min(1, max(0, (candidate.rawScore - floor) / max(ceiling - floor, 1e-6)))
-            }
-            guard let range = bounds[candidate.channel] else { return 0 }
-            let span = range.max - range.min
-            guard span > 1e-9 else { return 1 }
-            return (candidate.rawScore - range.min) / span
-        }
-
         // Metadata hits have no meaningful instant — a filename matches the whole
         // file — so they are applied to every moment of the asset rather than
         // arbitrarily latching onto the first one.
-        var timeless: [Int64: (score: Double, evidence: Evidence)] = [:]
+        var timeless: [Int64: Candidate] = [:]
         var timed: [Int64: [Candidate]] = [:]
         for candidate in candidates {
             if candidate.channel == .metadata {
-                let score = normalize(candidate)
-                if score > (timeless[candidate.assetID]?.score ?? -1) {
-                    timeless[candidate.assetID] = (score, candidate.evidence)
+                if candidate.rank < (timeless[candidate.assetID]?.rank ?? Int.max) {
+                    timeless[candidate.assetID] = candidate
                 }
             } else {
                 timed[candidate.assetID, default: []].append(candidate)
@@ -535,11 +710,12 @@ public struct SearchEngine: Sendable {
                 // stronger moment — collapsing them would hide results and
                 // manufacture confidence that isn't there.
                 let match = buckets.firstIndex { bucket in
-                    bucket.channelScores[candidate.channel] == nil
+                    bucket.channelRanks[candidate.channel] == nil
                         && abs(bucket.start - candidate.seconds) <= options.weights.temporalWindow
                 }
                 if let index = match {
-                    buckets[index].channelScores[candidate.channel] = normalize(candidate)
+                    buckets[index].channelRanks[candidate.channel] = candidate.rank
+                    buckets[index].channelConfidence[candidate.channel] = candidate.confidence
                     buckets[index].evidence.append(candidate.evidence)
                     buckets[index].start = min(buckets[index].start, candidate.seconds)
                     buckets[index].end = max(buckets[index].end, candidate.endSeconds)
@@ -548,14 +724,16 @@ public struct SearchEngine: Sendable {
                     var bucket = FusedCandidate(
                         assetID: assetID, momentID: candidate.momentID,
                         start: candidate.seconds, end: candidate.endSeconds)
-                    bucket.channelScores[candidate.channel] = normalize(candidate)
+                    bucket.channelRanks[candidate.channel] = candidate.rank
+                    bucket.channelConfidence[candidate.channel] = candidate.confidence
                     bucket.evidence.append(candidate.evidence)
                     buckets.append(bucket)
                 }
             }
             if let meta = timeless[assetID] {
                 for index in buckets.indices {
-                    buckets[index].channelScores[.metadata] = meta.score
+                    buckets[index].channelRanks[.metadata] = meta.rank
+                    buckets[index].channelConfidence[.metadata] = meta.confidence
                     buckets[index].evidence.append(meta.evidence)
                 }
             }
@@ -565,7 +743,8 @@ public struct SearchEngine: Sendable {
         // An asset matched only by its name still deserves to show up.
         for (assetID, meta) in timeless where timed[assetID] == nil {
             var bucket = FusedCandidate(assetID: assetID, momentID: nil, start: 0, end: 0)
-            bucket.channelScores[.metadata] = meta.score
+            bucket.channelRanks[.metadata] = meta.rank
+            bucket.channelConfidence[.metadata] = meta.confidence
             bucket.evidence.append(meta.evidence)
             fused.append(bucket)
         }
@@ -573,30 +752,74 @@ public struct SearchEngine: Sendable {
         return fused
     }
 
-    private func score(_ candidate: FusedCandidate) -> Double {
-        let weights = options.weights
-        var total = 0.0
-        total += weights.visual * (candidate.channelScores[.visual] ?? 0)
-        total += weights.transcript * (candidate.channelScores[.transcript] ?? 0)
-        total += weights.onScreenText * (candidate.channelScores[.ocr] ?? 0)
-        total += weights.metadata * (candidate.channelScores[.metadata] ?? 0)
-
-        // Corroboration bonus, scaled by how strong the agreeing signals are, so
-        // two weak matches don't outrank one excellent one.
-        let agreeing = candidate.channelScores.filter { $0.value > 0.15 }
-        if agreeing.count >= 2 {
-            let mean = agreeing.values.reduce(0, +) / Double(agreeing.count)
-            total += weights.agreementBonus * mean * Double(agreeing.count - 1)
+    private func weight(_ channel: Channel) -> Double {
+        switch channel {
+        case .visual: options.weights.visual
+        case .transcript: options.weights.transcript
+        case .ocr: options.weights.onScreenText
+        case .metadata: options.weights.metadata
         }
-        return total
+    }
+
+    private func trust(_ channel: Channel) -> Double {
+        switch channel {
+        case .visual: options.weights.visualTrust
+        case .transcript: options.weights.transcriptTrust
+        case .ocr: options.weights.onScreenTextTrust
+        case .metadata: options.weights.metadataTrust
+        }
+    }
+
+    /// What orders the list: weighted reciprocal rank fusion.
+    ///
+    /// Position, not magnitude. A result that is third in the visual channel and
+    /// second in the transcript beats one that is first in a single channel, and
+    /// none of it requires bm25 and cosine to be the same kind of number.
+    private func rankScore(_ candidate: FusedCandidate) -> Double {
+        candidate.channelRanks.reduce(0.0) { total, entry in
+            total + weight(entry.key) / (options.weights.rrfK + Double(entry.value))
+        }
+    }
+
+    /// The number the list is sorted by.
+    ///
+    /// `blend` multiplies the two: rank fusion decides *relative* order within a
+    /// band of similar quality, and confidence decides which band a result is in
+    /// at all. Multiplying rather than adding means a result no channel believes
+    /// cannot climb by appearing in many channels weakly — which was exactly how
+    /// "un plato de espagueti" collected four answers.
+    private func ordering(_ candidate: FusedCandidate) -> Double {
+        switch options.ranking {
+        case .rankFusion: rankScore(candidate)
+        case .confidence: confidence(candidate)
+        case .blend: rankScore(candidate) * (0.25 + 0.75 * confidence(candidate))
+        }
+    }
+
+    /// What the interface may claim: noisy-OR over the channels' own beliefs.
+    ///
+    /// Independent evidence compounds — 0.6 and 0.6 make 0.84, which is the
+    /// product's whole thesis in one line — while nothing can exceed 1, so no
+    /// arrangement of weak signals can ever display as certainty.
+    private func confidence(_ candidate: FusedCandidate) -> Double {
+        let miss = candidate.channelConfidence.reduce(1.0) { product, entry in
+            product * (1 - trust(entry.key) * min(1, max(0, entry.value)))
+        }
+        return 1 - miss
     }
 
     // MARK: - Result assembly
 
     private func build(results fused: [FusedCandidate]) throws -> [SearchResult] {
+        // Ordered by rank fusion, reported by confidence. Ties in RRF are common
+        // and meaningful — two results at the same rank in the same channel —
+        // so confidence breaks them, which keeps the order stable and puts the
+        // better-evidenced of two equals first.
         let scored = fused
-            .map { (candidate: $0, score: score($0)) }
-            .sorted { $0.score > $1.score }
+            .map { (candidate: $0, score: ordering($0), confidence: confidence($0)) }
+            .sorted {
+                $0.score == $1.score ? $0.confidence > $1.confidence : $0.score > $1.score
+            }
 
         var top = Array(scored.prefix(options.limit * 3))
         if options.suppressNearDuplicates {
@@ -606,14 +829,8 @@ public struct SearchEngine: Sendable {
 
         // Deliberately *not* rescaled so the best hit reads 100%. A weak match
         // should look weak, even when it is the best thing in the library.
-        let ceiling = options.weights.visual + options.weights.transcript
-            + options.weights.onScreenText + options.weights.metadata
-
-        // Applied against the number a person will actually read, after the same
-        // division the result carries — otherwise the threshold would mean
-        // something different from what the interface displays.
         if options.minimumConfidence > 0 {
-            top = top.filter { min(1, $0.score / ceiling) >= options.minimumConfidence }
+            top = top.filter { $0.confidence >= options.minimumConfidence }
         }
 
         let assetIDs = Array(Set(top.map(\.candidate.assetID)))
@@ -688,7 +905,7 @@ public struct SearchEngine: Sendable {
                 mediaType: asset.mediaType,
                 startSeconds: entry.candidate.start,
                 endSeconds: max(entry.candidate.end, entry.candidate.start),
-                score: min(1, entry.score / ceiling),
+                score: entry.confidence,
                 evidence: evidence,
                 locations: locations,
                 previewPath: previewPath,
@@ -699,8 +916,9 @@ public struct SearchEngine: Sendable {
 
     /// Twelve near-identical frames from the same interview is a worse answer
     /// than three different interviews.
-    private func suppressDuplicates(_ entries: [(candidate: FusedCandidate, score: Double)])
-        -> [(candidate: FusedCandidate, score: Double)] {
+    private func suppressDuplicates(
+        _ entries: [(candidate: FusedCandidate, score: Double, confidence: Double)]
+    ) -> [(candidate: FusedCandidate, score: Double, confidence: Double)] {
         var perAsset: [Int64: Int] = [:]
         return entries.filter { entry in
             let count = perAsset[entry.candidate.assetID, default: 0]

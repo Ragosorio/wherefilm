@@ -34,6 +34,12 @@ struct Eval: AsyncParsableCommand {
     @Flag(name: .long, help: "Skip the Apple on-device model even if it's available.")
     var noLLM = false
 
+    @Flag(name: .long, help: "Skip the system translator (simulates a Mac without the language pack).")
+    var noTranslation = false
+
+    @Flag(name: .long, help: "Skip CLIP caption templates around each visual phrase.")
+    var noTemplates = false
+
     @Option(name: .long, help: "Write the full report here as JSON.")
     var json: String?
 
@@ -45,6 +51,30 @@ struct Eval: AsyncParsableCommand {
 
     @Option(name: .long, help: "Only run cases whose id or category contains this.")
     var filter: String?
+
+    @Option(name: .long, help: "Ranking: rankFusion, confidence, blend.")
+    var ranking: String = "confidence"
+
+    @Option(name: .long, help: "Reciprocal rank fusion damping constant.")
+    var rrfK: Double?
+
+    @Option(name: .long, help: "Cosine similarity below which a visual hit is discarded.")
+    var minVisual: Float?
+
+    @Option(name: .long, help: "Drop results the engine itself rates below this (0–1).")
+    var minConfidence: Double?
+
+    @Flag(name: .long, help: "Judge visual hits by surprise (z-score) instead of raw cosine.")
+    var surprise = false
+
+    @Option(name: .long, help: "Standard deviations above the query mean below which a hit is noise.")
+    var zFloor: Double?
+
+    @Option(name: .long, help: "Standard deviations at which a visual hit is as good as it gets.")
+    var zCeiling: Double?
+
+    @Option(name: .long, help: "Cosine similarity treated as a perfect visual match.")
+    var strongVisual: Float?
 
     func run() async throws {
         let store = try storeOptions.makeStore()
@@ -66,8 +96,22 @@ struct Eval: AsyncParsableCommand {
         var options = SearchEngine.Options()
         options.limit = limit
         options.variant = variant
+        guard let mode = SearchEngine.Ranking(rawValue: ranking) else {
+            throw ValidationError("Unknown ranking '\(ranking)'. "
+                + "Use one of: \(SearchEngine.Ranking.allCases.map(\.rawValue).joined(separator: ", ")).")
+        }
+        options.ranking = mode
+        if let rrfK { options.weights.rrfK = rrfK }
+        if let minVisual { options.weights.minimumVisualSimilarity = minVisual }
+        if let minConfidence { options.minimumConfidence = minConfidence }
+        options.weights.judgesVisualBySurprise = surprise
+        if let zFloor { options.weights.visualZFloor = zFloor }
+        if let zCeiling { options.weights.visualZCeiling = zCeiling }
+        if let strongVisual { options.weights.strongVisualSimilarity = strongVisual }
         let engine = SearchEngine(store: store, options: options)
-        let planner = QueryPlanner(useFoundationModel: !noLLM)
+        let planner = QueryPlanner(useFoundationModel: !noLLM,
+                                   useSystemTranslation: !noTranslation,
+                                   usesPromptTemplates: !noTemplates)
         let vectorIndex = try makeVectorIndex(variant: variant)
         try? await vectorIndex.openForSearch()
 
@@ -111,7 +155,13 @@ struct Eval: AsyncParsableCommand {
             library: evaluationSet.library,
             producedAt: Date(),
             configuration: "model=\(variant.rawValue) limit=\(limit) "
-                + "llm=\(noLLM ? "off" : (QueryPlanner.foundationModelAvailable ? "on" : "unavailable"))",
+                + "ranking=\(mode.rawValue) k=\(Int(options.weights.rrfK)) "
+                + "floor=\(minVisual.map { String($0) } ?? "model") "
+                + "minConfidence=\(options.minimumConfidence) "
+                + "surprise=\(surprise ? "z\(options.weights.visualZFloor)–\(options.weights.visualZCeiling)" : "off") "
+                + "ceiling=\(strongVisual.map { String($0) } ?? "model") "
+                + "llm=\(noLLM ? "off" : (QueryPlanner.foundationModelAvailable ? "on" : "unavailable")) "
+                + "translation=\(noTranslation ? "off" : "on") templates=\(noTemplates ? "off" : "on")",
             cases: outcomes,
             calibration: evaluator.calibration(from: calibrationSamples))
 

@@ -419,6 +419,67 @@ public final class IndexStore: Sendable {
         }
     }
 
+    /// A spread sample of the library's vectors.
+    ///
+    /// This exists to answer a question the raw cosine cannot: *how unusually*
+    /// similar is this query to this moment? CLIP's modality gap means some
+    /// text vectors sit closer to every image than others do, so an absolute
+    /// floor that is right for "atardecer frente al mar" is wrong for "un plato
+    /// de espagueti" — the second is similar to nothing in particular, but
+    /// uniformly, and a fixed floor lets it through.
+    ///
+    /// Subtracting the query's mean similarity to the library removes that
+    /// per-query offset, and because every stored vector is unit length, the
+    /// mean similarity is a single dot product against this centroid rather
+    /// than a scan.
+    ///
+    /// Sampled with a stride over the autoincrementing moment id, so the sample
+    /// spreads across the whole library instead of over-representing whatever
+    /// was indexed first, and costs one indexed scan of a few thousand rows.
+    public func embeddingSample(modelID: String, limit: Int = 1024) throws -> [[Float]] {
+        let total = try embeddingCount(modelID: modelID)
+        guard total > 0 else { return [] }
+        let stride = max(1, total / max(1, limit))
+        return try dbPool.read { db in
+            try Row.fetchAll(db, sql: """
+                SELECT quantization, scale, vector FROM embeddings
+                WHERE modelID = ? AND (momentID % ?) = 0
+                LIMIT ?
+                """, arguments: [modelID, stride, limit])
+                .map { row in
+                    let quantization = VectorQuantization(rawValue: row["quantization"]) ?? .int8
+                    return VectorCodec.decode(row["vector"], scale: row["scale"],
+                                              quantization: quantization)
+                }
+        }
+    }
+
+    /// The stored vectors for specific moments.
+    ///
+    /// Needed by ranking, not by indexing: judging *how unusual* a match is
+    /// requires knowing something about the matched vector itself, not only its
+    /// distance from the query.
+    public func embeddings(momentIDs: [Int64], modelID: String) throws -> [Int64: [Float]] {
+        guard !momentIDs.isEmpty else { return [:] }
+        return try dbPool.read { db in
+            var out: [Int64: [Float]] = [:]
+            for chunk in stride(from: 0, to: momentIDs.count, by: 500).map({ start in
+                Array(momentIDs[start..<min(start + 500, momentIDs.count)])
+            }) {
+                let rows = try Row.fetchAll(db, sql: """
+                    SELECT momentID, quantization, scale, vector FROM embeddings
+                    WHERE modelID = ? AND momentID IN (\(databaseQuestionMarks(count: chunk.count)))
+                    """, arguments: StatementArguments([modelID] + chunk.map { $0 as any DatabaseValueConvertible }))
+                for row in rows {
+                    let quantization = VectorQuantization(rawValue: row["quantization"]) ?? .int8
+                    out[row["momentID"]] = VectorCodec.decode(
+                        row["vector"], scale: row["scale"], quantization: quantization)
+                }
+            }
+            return out
+        }
+    }
+
     public func embeddingCount(modelID: String) throws -> Int {
         try dbPool.read { db in
             try Int.fetchOne(db, sql: "SELECT count(*) FROM embeddings WHERE modelID = ?",
