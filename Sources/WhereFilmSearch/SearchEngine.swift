@@ -1,5 +1,7 @@
 import Foundation
+import CoreGraphics
 import GRDB
+import ImageIO
 import WhereFilmCore
 import WhereFilmML
 
@@ -91,6 +93,8 @@ public struct SearchResult: Sendable {
 public enum SearchPhase: String, Sendable {
     case fast
     case refined
+    /// A stronger model has re-examined the survivors.
+    case reranked
 }
 
 /// Where the time in one search actually went.
@@ -230,9 +234,34 @@ public struct SearchEngine: Sendable {
         case blend
     }
 
+    /// Second-pass ranking with a stronger model over the few results that
+    /// survived the first.
+    ///
+    /// This is the cheap half of coarse-to-fine. Indexing runs the smallest
+    /// model in the family across millions of frames because that cost is paid
+    /// per frame; ranking can afford a model 2.4× more expensive because it is
+    /// paid for forty *thumbnails that already exist on disk*. No video is
+    /// reopened and no frame is decoded again.
+    public struct Rerank: Sendable {
+        /// Off until a library proves it pays. It is a real cost in latency and
+        /// in a second model resident for a moment.
+        public var isEnabled = false
+        /// Which model does the second opinion. S2 is the best-recall small
+        /// variant Apple ships compiled.
+        public var variant: MobileCLIPVariant = .s2
+        /// How many results to re-examine. Past this the first pass has already
+        /// decided nobody will look.
+        public var depth = 40
+        /// How much the second opinion replaces the first, 0…1.
+        public var authority = 1.0
+
+        public init() {}
+    }
+
     public struct Options: Sendable {
         public var limit = 20
         public var ranking: Ranking = .confidence
+        public var rerank = Rerank()
         /// How deep to look in each channel before fusing. Wider than `limit`,
         /// because a result that wins on agreement may be mid-pack in both
         /// channels individually.
@@ -287,7 +316,8 @@ public struct SearchEngine: Sendable {
         let text = try textCandidates(plan: plan)
         let visual = try await visualCandidates(plan: plan, vectorIndex: vectorIndex)
         try Task.checkCancellation()
-        return try build(results: fuse(eligible(text + visual, plan: plan)))
+        let ranked = rank(fuse(eligible(text + visual, plan: plan)))
+        return try assemble(await rerank(ranked, plan: plan))
     }
 
     /// The part of search that never needs Core ML or the vector index.
@@ -365,12 +395,33 @@ public struct SearchEngine: Sendable {
                     try Task.checkCancellation()
                     let refinedFusion = fuse(text + visual)
                     timings.record("fuse2", since: mark); mark = DispatchTime.now()
-                    let refined = try build(results: refinedFusion)
+                    let refinedRanking = rank(refinedFusion)
+                    let refined = try assemble(refinedRanking)
                     timings.record("hydrate2", since: mark)
                     try Task.checkCancellation()
+
+                    let willRerank = options.rerank.isEnabled && plan.hasVisualSignal
                     continuation.yield(SearchUpdate(
                         phase: .refined,
                         results: refined,
+                        elapsedMilliseconds: Date().timeIntervalSince(started) * 1_000,
+                        isFinal: !willRerank,
+                        timings: timings
+                    ))
+                    guard willRerank else {
+                        continuation.finish()
+                        return
+                    }
+
+                    mark = DispatchTime.now()
+                    let reranked = await rerank(refinedRanking, plan: plan)
+                    timings.record("rerank", since: mark); mark = DispatchTime.now()
+                    try Task.checkCancellation()
+                    let final = try assemble(reranked)
+                    timings.record("hydrate3", since: mark)
+                    continuation.yield(SearchUpdate(
+                        phase: .reranked,
+                        results: final,
                         elapsedMilliseconds: Date().timeIntervalSince(started) * 1_000,
                         isFinal: true,
                         timings: timings
@@ -908,12 +959,18 @@ public struct SearchEngine: Sendable {
 
     // MARK: - Result assembly
 
-    private func build(results fused: [FusedCandidate]) throws -> [SearchResult] {
-        // Ordered by rank fusion, reported by confidence. Ties in RRF are common
-        // and meaningful — two results at the same rank in the same channel —
-        // so confidence breaks them, which keeps the order stable and puts the
-        // better-evidenced of two equals first.
-        let scored = fused
+    private typealias Ranked = (candidate: FusedCandidate, score: Double, confidence: Double)
+
+    /// Orders and trims, without touching the database.
+    ///
+    /// Split out from assembly so a second pass can reorder what the first pass
+    /// chose, which is the whole shape of coarse-to-fine retrieval.
+    private func rank(_ fused: [FusedCandidate]) -> [Ranked] {
+        // Ordered by the configured ranking, reported by confidence. Ties are
+        // common and meaningful — two results at the same rank in the same
+        // channel — so confidence breaks them, which keeps the order stable and
+        // puts the better-evidenced of two equals first.
+        let scored: [Ranked] = fused
             .map { (candidate: $0, score: ordering($0), confidence: confidence($0)) }
             .sorted {
                 $0.score == $1.score ? $0.confidence > $1.confidence : $0.score > $1.score
@@ -930,6 +987,94 @@ public struct SearchEngine: Sendable {
         if options.minimumConfidence > 0 {
             top = top.filter { $0.confidence >= options.minimumConfidence }
         }
+        return top
+    }
+
+    /// Asks a stronger model about the few results that survived.
+    ///
+    /// Every candidate here already has a thumbnail on disk — the preview cache
+    /// wrote it during indexing — so the second opinion costs one batch of image
+    /// encodes over forty 480 px JPEGs and nothing else. The expensive parts of
+    /// visual search, opening the original and decoding a frame, do not happen
+    /// twice.
+    ///
+    /// Results without a preview keep the first pass's opinion rather than being
+    /// demoted for it. A missing thumbnail is a cache eviction, not evidence.
+    private func rerank(_ ranked: [Ranked], plan: SearchPlan) async -> [Ranked] {
+        let settings = options.rerank
+        guard settings.isEnabled, plan.hasVisualSignal, !ranked.isEmpty else { return ranked }
+
+        let considered = Array(ranked.prefix(settings.depth))
+        let momentIDs = considered.compactMap(\.candidate.momentID)
+        guard !momentIDs.isEmpty,
+              let previews = try? store.previewPaths(momentIDs: momentIDs),
+              !previews.isEmpty else { return ranked }
+
+        // The query, in the second model's own space. Vectors from different
+        // models are never comparable, which is why both halves are re-encoded.
+        guard let query = try? await embeddingProvider.embedding(
+            for: plan.visualPhrases, variant: settings.variant), !query.isEmpty
+        else { return ranked }
+
+        var images: [CGImage] = []
+        var rows: [Int] = []
+        for (index, entry) in considered.enumerated() {
+            guard let momentID = entry.candidate.momentID,
+                  let path = previews[momentID],
+                  let image = Self.loadImage(atPath: path) else { continue }
+            images.append(image)
+            rows.append(index)
+        }
+        guard !images.isEmpty else { return ranked }
+
+        guard let encoder = try? MobileCLIPImageEncoder(variant: settings.variant),
+              let vectors = try? encoder.encode(batch: images), vectors.count == images.count
+        else { return ranked }
+
+        // These constants are S0's, measured on S0, and `MobileCLIPVariant` says
+        // plainly that swapping models has to swap them too. They have not been
+        // re-measured for S2, and that is the most likely reason the second pass
+        // does not yet pay for itself:
+        //
+        //     no rerank    nDCG@10 0.855 / 0.856      (two deterministic runs)
+        //     rerank S2    nDCG@10 0.840 / 0.840
+        //
+        // A better model judged on another model's scale is not obviously better
+        // at anything. This stays off by default until the calibration is
+        // measured on a library where the two models disagree often enough for
+        // the difference to be visible at all.
+        let floor = Double(settings.variant.similarityFloor)
+        let ceiling = Double(settings.variant.similarityCeiling)
+        var updated = ranked
+        for (offset, row) in rows.enumerated() {
+            let similarity = Double(VectorCodec.dot(query, vectors[offset]))
+            let calibrated = min(1, max(0, (similarity - floor) / max(ceiling - floor, 1e-6)))
+            var candidate = updated[row].candidate
+            let previous = candidate.channelConfidence[.visual] ?? 0
+            // `authority` is a dial rather than a switch because the second model
+            // is better, not infallible: at 1.0 it replaces the first opinion, at
+            // 0.5 the two average.
+            candidate.channelConfidence[.visual] =
+                previous * (1 - settings.authority) + calibrated * settings.authority
+            updated[row] = (candidate, ordering(candidate), confidence(candidate))
+        }
+        return updated.sorted {
+            $0.score == $1.score ? $0.confidence > $1.confidence : $0.score > $1.score
+        }
+    }
+
+    static func loadImage(atPath path: String) -> CGImage? {
+        guard FileManager.default.fileExists(atPath: path),
+              let source = CGImageSourceCreateWithURL(URL(fileURLWithPath: path) as CFURL, nil)
+        else { return nil }
+        return CGImageSourceCreateImageAtIndex(source, 0, nil)
+    }
+
+    private func build(results fused: [FusedCandidate]) throws -> [SearchResult] {
+        try assemble(rank(fused))
+    }
+
+    private func assemble(_ top: [Ranked]) throws -> [SearchResult] {
 
         let assetIDs = Array(Set(top.map(\.candidate.assetID)))
         let assets = try store.assets(ids: assetIDs)

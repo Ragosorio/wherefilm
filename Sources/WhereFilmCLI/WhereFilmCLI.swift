@@ -245,6 +245,9 @@ struct Search: AsyncParsableCommand {
     @Option(name: .long, help: "Repeat the same query in-process and report p50/p95/p99 latency.")
     var benchmarkRuns = 1
 
+    @Flag(name: .long, help: "Re-examine the top results with a stronger model (experimental).")
+    var rerank = false
+
     func run() async throws {
         let store = try storeOptions.makeStore()
         guard let variant = MobileCLIPVariant(rawValue: model) else {
@@ -275,6 +278,7 @@ struct Search: AsyncParsableCommand {
         if let channelDepth { options.channelDepth = channelDepth }
         if let minVisual { options.weights.minimumVisualSimilarity = minVisual }
         if let strongVisual { options.weights.strongVisualSimilarity = strongVisual }
+        options.rerank.isEnabled = rerank
 
         let engine = SearchEngine(store: store, options: options)
         var results: [SearchResult] = []

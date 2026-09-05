@@ -79,6 +79,15 @@ struct Eval: AsyncParsableCommand {
     @Option(name: .long, help: "Weight of the scene-label channel.")
     var labelWeight: Double?
 
+    @Flag(name: .long, help: "Re-examine the survivors with a stronger model.")
+    var rerank = false
+
+    @Option(name: .long, help: "Which model does the second opinion: s0, s1, s2, blt.")
+    var rerankModel: String = "s2"
+
+    @Option(name: .long, help: "How many results the second pass re-examines.")
+    var rerankDepth: Int?
+
     @Option(name: .long, help: "Cosine similarity treated as a perfect visual match.")
     var strongVisual: Float?
 
@@ -115,6 +124,9 @@ struct Eval: AsyncParsableCommand {
         if let zCeiling { options.weights.visualZCeiling = zCeiling }
         if let labelRarity { options.weights.minimumLabelRarity = labelRarity }
         if let labelWeight { options.weights.sceneLabel = labelWeight }
+        options.rerank.isEnabled = rerank
+        if let second = MobileCLIPVariant(rawValue: rerankModel) { options.rerank.variant = second }
+        if let rerankDepth { options.rerank.depth = rerankDepth }
         if let strongVisual { options.weights.strongVisualSimilarity = strongVisual }
         let engine = SearchEngine(store: store, options: options)
         let planner = QueryPlanner(useFoundationModel: !noLLM,
@@ -166,6 +178,7 @@ struct Eval: AsyncParsableCommand {
                 + "ranking=\(mode.rawValue) k=\(Int(options.weights.rrfK)) "
                 + "floor=\(minVisual.map { String($0) } ?? "model") "
                 + "minConfidence=\(options.minimumConfidence) "
+                + "rerank=\(rerank ? options.rerank.variant.rawValue : "off") "
                 + "surprise=\(surprise ? "z\(options.weights.visualZFloor)–\(options.weights.visualZCeiling)" : "off") "
                 + "ceiling=\(strongVisual.map { String($0) } ?? "model") "
                 + "llm=\(noLLM ? "off" : (QueryPlanner.foundationModelAvailable ? "on" : "unavailable")) "
