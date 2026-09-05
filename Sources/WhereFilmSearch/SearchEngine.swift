@@ -1194,7 +1194,7 @@ public struct SearchEngine: Sendable {
         return updated.sorted(by: Self.precedes)
     }
 
-    static func loadImage(atPath path: String) -> CGImage? {
+    public static func loadImage(atPath path: String) -> CGImage? {
         guard FileManager.default.fileExists(atPath: path),
               let source = CGImageSourceCreateWithURL(URL(fileURLWithPath: path) as CFURL, nil)
         else { return nil }

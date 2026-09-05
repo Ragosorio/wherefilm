@@ -29,20 +29,30 @@ public enum MobileCLIPVariant: String, Sendable, CaseIterable {
     /// Cosine similarity below which a hit from this model is noise.
     ///
     /// This lives on the *model*, not on the search engine, because the scale is
-    /// a property of how the model was trained — MobileCLIP v1 puts real matches
-    /// around 0.18–0.26. A deliberately unrelated query can still reach roughly
-    /// 0.12 on a small landscape library, which is why the default floor is more
-    /// conservative than a rank-only threshold. Its range is roughly half the
-    /// spread of the original OpenAI CLIP. Swapping models has to swap these
-    /// numbers too, or "how confident is this?" becomes meaningless.
+    /// a property of how the model was trained. Its range is roughly half the
+    /// spread of the original OpenAI CLIP, and swapping models has to swap these
+    /// numbers too, or "how confident is this?" becomes meaningless. The UI can
+    /// offer stricter or broader exploration by overriding it per search.
     ///
-    /// Re-measured on this hardware against the included real-media fixture:
-    /// useful matches landed around 0.18+, while "un plato de espagueti" over a
-    /// landscape-only library reached 0.125. The UI can offer stricter or broader
-    /// exploration by overriding this value per search.
+    /// Re-measured 2026-09-05 with `wherefilm calibrate`, which scores every
+    /// preview in a library against a labelled set and reports where the right
+    /// and wrong answers actually separate. Two findings changed this number and
+    /// one changed what to expect of it:
+    ///
+    ///  - The best single threshold on the real-media library is ~0.22 by F1, and
+    ///    0.18 is where the trade turns: nonsense queries that returned something
+    ///    fell from 38% to 12%, for one point of Recall@10 and 0.04 of nDCG.
+    ///    Halving false positives is worth that; 0.22 costs more and buys nothing
+    ///    further.
+    ///  - S0 and S2 separate almost identically — relevant/irrelevant medians
+    ///    0.191/0.133 against 0.177/0.122 — so the bigger model is not better at
+    ///    *this*, which is why reranking with it does not pay.
+    ///  - The distributions overlap heavily either way. No single cosine
+    ///    threshold makes this model reliable on its own, which is the case for
+    ///    fusing four channels rather than trusting one.
     public var similarityFloor: Float {
         switch self {
-        case .s0, .s1, .s2, .blt: 0.14
+        case .s0, .s1, .s2, .blt: 0.18
         }
     }
 

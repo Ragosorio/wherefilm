@@ -23,7 +23,7 @@ struct WhereFilm: AsyncParsableCommand {
         version: "0.1.0",
         subcommands: [Scan.self, Index.self, Search.self, Status.self,
                       Volumes.self, Doctor.self, Rebuild.self, Tokenize.self,
-                      Eval.self, People.self, Usage.self, Sidecar.self, BenchmarkFixture.self],
+                      Eval.self, Calibrate.self, People.self, Usage.self, Sidecar.self, BenchmarkFixture.self],
         defaultSubcommand: Status.self)
 }
 

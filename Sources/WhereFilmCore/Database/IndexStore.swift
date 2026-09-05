@@ -498,6 +498,38 @@ public final class IndexStore: Sendable {
         }
     }
 
+
+    /// Moments that have a thumbnail on disk, for work that wants pixels without
+    /// reopening an original.
+    ///
+    /// Calibrating a model and reranking with one both need the same thing: the
+    /// pictures the preview cache already wrote. Anything that reopens a video to
+    /// answer a query has misunderstood the product.
+    public struct PreviewedMoment: Sendable {
+        public let momentID: Int64
+        public let assetID: Int64
+        public let startSeconds: Double
+        public let endSeconds: Double
+        public let previewPath: String
+    }
+
+    public func allMomentsWithPreviews(limit: Int = 5000) throws -> [PreviewedMoment] {
+        try dbPool.read { db in
+            try Row.fetchAll(db, sql: """
+                SELECT moments.momentID AS momentID, moments.assetID AS assetID,
+                       moments.startSeconds AS startSeconds, moments.endSeconds AS endSeconds,
+                       previews.cachePath AS cachePath
+                FROM moments JOIN previews ON previews.momentID = moments.momentID
+                ORDER BY moments.momentID LIMIT ?
+                """, arguments: [limit])
+                .map {
+                    PreviewedMoment(momentID: $0["momentID"], assetID: $0["assetID"],
+                                    startSeconds: $0["startSeconds"], endSeconds: $0["endSeconds"],
+                                    previewPath: $0["cachePath"])
+                }
+        }
+    }
+
     public func embeddingCount(modelID: String) throws -> Int {
         try dbPool.read { db in
             try Int.fetchOne(db, sql: "SELECT count(*) FROM embeddings WHERE modelID = ?",
