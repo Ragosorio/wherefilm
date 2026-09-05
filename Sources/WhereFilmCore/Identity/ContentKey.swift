@@ -25,6 +25,12 @@ public enum ContentKey {
         durationSeconds: Double? = nil,
         codec: String? = nil
     ) throws -> String {
+        try BackgroundIO.run {
+            try quickUnthrottled(url: url, fileSize: fileSize, durationSeconds: durationSeconds, codec: codec)
+        }
+    }
+
+    private static func quickUnthrottled(url: URL, fileSize: Int64, durationSeconds: Double?, codec: String?) throws -> String {
         var hasher = SHA256()
         hasher.update(data: Data("wf-quick-v1".utf8))
         hasher.update(data: withUnsafeBytes(of: fileSize.littleEndian) { Data($0) })
@@ -67,6 +73,10 @@ public enum ContentKey {
     /// when we are chasing a file across volumes, or when the machine is idle and
     /// the user asked for verification.
     public static func strong(url: URL, progress: (@Sendable (Int64) -> Void)? = nil) throws -> String {
+        try BackgroundIO.run { try strongUnthrottled(url: url, progress: progress) }
+    }
+
+    private static func strongUnthrottled(url: URL, progress: (@Sendable (Int64) -> Void)?) throws -> String {
         var hasher = SHA256()
         hasher.update(data: Data("wf-strong-v1".utf8))
 

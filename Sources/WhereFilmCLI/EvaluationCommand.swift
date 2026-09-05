@@ -34,6 +34,9 @@ struct Eval: AsyncParsableCommand {
     @Flag(name: .long, help: "Skip the Apple on-device model even if it's available.")
     var noLLM = false
 
+    @Flag(name: .long, help: "Use this catalog’s recorded learning; off for reproducible baselines.")
+    var learnedWeights = false
+
     @Flag(name: .long, help: "Skip the system translator (simulates a Mac without the language pack).")
     var noTranslation = false
 
@@ -110,6 +113,7 @@ struct Eval: AsyncParsableCommand {
 
         var options = SearchEngine.Options()
         options.limit = limit
+        options.usesLearnedWeights = learnedWeights
         options.variant = variant
         guard let mode = SearchEngine.Ranking(rawValue: ranking) else {
             throw ValidationError("Unknown ranking '\(ranking)'. "
@@ -132,7 +136,7 @@ struct Eval: AsyncParsableCommand {
         let planner = QueryPlanner(useFoundationModel: !noLLM,
                                    useSystemTranslation: !noTranslation,
                                    usesPromptTemplates: !noTemplates)
-        let vectorIndex = try makeVectorIndex(variant: variant)
+        let vectorIndex = try makeVectorIndex(variant: variant, store: store)
         try? await vectorIndex.openForSearch()
 
         let evaluator = Evaluator(defaultToleranceSeconds: evaluationSet.defaultToleranceSeconds)
@@ -178,6 +182,7 @@ struct Eval: AsyncParsableCommand {
                 + "ranking=\(mode.rawValue) k=\(Int(options.weights.rrfK)) "
                 + "floor=\(minVisual.map { String($0) } ?? "model") "
                 + "minConfidence=\(options.minimumConfidence) "
+                + "learned=\(learnedWeights ? "on" : "off") "
                 + "rerank=\(rerank ? options.rerank.variant.rawValue : "off") "
                 + "surprise=\(surprise ? "z\(options.weights.visualZFloor)–\(options.weights.visualZCeiling)" : "off") "
                 + "ceiling=\(strongVisual.map { String($0) } ?? "model") "

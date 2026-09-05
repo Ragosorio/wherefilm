@@ -240,7 +240,8 @@ struct SearchView: View {
                 ScrollView {
                     LazyVGrid(columns: [GridItem(.adaptive(minimum: 280, maximum: 390), spacing: 16)], spacing: 16) {
                         ForEach(model.results, id: \.momentKey) { result in
-                            ResultCard(result: result) { selected = result }
+                            ResultCard(result: result) { model.recordOpen(result); selected = result }
+                                .help(result.preferenceExplanation ?? "Abrir resultado")
                         }
                     }
                     .padding(.horizontal, 44)
@@ -340,7 +341,45 @@ struct SearchView: View {
                 get: { model.launchesAtLogin },
                 set: { model.setLaunchesAtLogin($0) }
             ))
-            Text("Tus originales nunca se mueven. El índice y las vistas previas viven únicamente en esta Mac.")
+            Toggle("Indexar solo en este horario", isOn: Binding(
+                get: { model.scheduledIndexing }, set: { model.scheduledIndexing = $0 }))
+            if model.scheduledIndexing {
+                HStack {
+                    Picker("Desde", selection: Binding(get: { model.indexingStartHour }, set: { model.indexingStartHour = $0 })) {
+                        ForEach(0..<24) { Text(String(format: "%02d:00", $0)).tag($0) }
+                    }
+                    Picker("Hasta", selection: Binding(get: { model.indexingEndHour }, set: { model.indexingEndHour = $0 })) {
+                        ForEach(0..<24) { Text(String(format: "%02d:00", $0)).tag($0) }
+                    }
+                }
+                Text("Hora local. Horas iguales permiten todo el día. La búsqueda sigue disponible.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Divider()
+            Toggle("Aprender del uso (experimental)", isOn: Binding(
+                get: { model.learnsFromUsage }, set: { model.setLearnsFromUsage($0) }))
+            Text("Guarda acciones en esta Mac para ajustar el orden. Puedes borrar el historial; no cambia las coincidencias ni su confianza.")
+                .font(.caption).foregroundStyle(.secondary)
+            HStack {
+                Button("Ver") { model.inspectUsage() }
+                Button("Exportar…") { model.exportUsage() }
+                Button("Borrar historial", role: .destructive) { model.forgetUsage() }
+            }
+            if let status = model.usageStatus {
+                Text(status).font(.caption).foregroundStyle(.secondary)
+            }
+            Divider()
+            HStack {
+                Menu("Exportar índice de disco…") {
+                    ForEach(model.volumes, id: \.volumeUUID) { volume in
+                        Button(volume.name) { model.exportVolume(volume) }
+                    }
+                }.disabled(model.volumes.isEmpty || model.isTransferringIndex)
+                Button("Importar índice…") { model.importSidecar() }
+                    .disabled(model.isTransferringIndex)
+            }
+            if model.isTransferringIndex { ProgressView().controlSize(.small) }
+            Text("Tus originales nunca se mueven. El índice se comparte solo si exportas un sidecar.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)

@@ -15,6 +15,17 @@ public enum Evidence: Sendable {
     case person(name: String, seconds: Double)
     case metadata(text: String, kind: SearchTextKind)
 
+    public var channel: String {
+        switch self {
+        case .visual: "visual"
+        case .transcript: "transcript"
+        case .onScreenText: "ocr"
+        case .sceneLabel: "label"
+        case .person: "person"
+        case .metadata: "metadata"
+        }
+    }
+
     public var label: String {
         switch self {
         case .visual(let similarity, let phrase):
@@ -61,6 +72,7 @@ public struct SearchResult: Sendable {
     public let previewPath: URL?
     public let createdAt: Date?
     public let durationSeconds: Double?
+    public var preferenceExplanation: String? = nil
 
     public var bestLocation: ResolvedLocation? {
         locations.min { lhs, rhs in rank(lhs.availability) < rank(rhs.availability) }
@@ -271,6 +283,12 @@ public struct SearchEngine: Sendable {
     public struct Options: Sendable {
         public var limit = 20
         public var ranking: Ranking = .confidence
+        /// Let the library's own usage nudge the channel weights.
+        ///
+        /// Reordering only — see `LearnedWeights`. Below two hundred recorded
+        /// interactions this does nothing at all, because adapting to a handful
+        /// of clicks is worse than not adapting.
+        public var usesLearnedWeights = false
         public var rerank = Rerank()
         /// How deep to look in each channel before fusing. Wider than `limit`,
         /// because a result that wins on agreement may be mid-pack in both
@@ -296,6 +314,9 @@ public struct SearchEngine: Sendable {
     let volumes: VolumeRegistry
     private let embeddingProvider: any QueryEmbeddingProviding
     public var options: Options
+    /// Filled in once per search, before ranking, so every call to `weight`
+    /// sees the same numbers.
+    private var learned: [String: IndexStore.ChannelPreference] = [:]
 
     public init(store: IndexStore, volumes: VolumeRegistry = VolumeRegistry(),
                 options: Options = Options()) {
@@ -323,6 +344,18 @@ public struct SearchEngine: Sendable {
     }
 
     public func search(plan: SearchPlan, vectorIndex: VectorIndex?) async throws -> [SearchResult] {
+        var engine = self
+        await engine.loadLearnedWeights()
+        return try await engine.searchLoaded(plan: plan, vectorIndex: vectorIndex)
+    }
+
+    private mutating func loadLearnedWeights() async {
+        guard options.usesLearnedWeights else { return }
+        learned = await LearnedWeights.shared.preferences(store: store)
+    }
+
+    private func searchLoaded(plan: SearchPlan,
+                              vectorIndex: VectorIndex?) async throws -> [SearchResult] {
         let text = try textCandidates(plan: plan)
         let visual = try await visualCandidates(plan: plan, vectorIndex: vectorIndex)
         try Task.checkCancellation()
@@ -332,7 +365,11 @@ public struct SearchEngine: Sendable {
 
     /// The part of search that never needs Core ML or the vector index.
     public func searchFast(plan: SearchPlan) throws -> [SearchResult] {
-        try build(results: fuse(eligible(textCandidates(plan: plan), plan: plan)))
+        var engine = self
+        if options.usesLearnedWeights, try store.usageLearningEnabled() {
+            engine.learned = Dictionary(uniqueKeysWithValues: try store.channelPreferences().map { ($0.channel, $0) })
+        }
+        return try engine.build(results: engine.fuse(engine.eligible(engine.textCandidates(plan: plan), plan: plan)))
     }
 
     /// Applies the hard filters the planner has always produced and nobody has
@@ -370,16 +407,18 @@ public struct SearchEngine: Sendable {
     ) -> AsyncThrowingStream<SearchUpdate, Error> {
         AsyncThrowingStream { continuation in
             let worker = Task {
+                var engine = self
+                await engine.loadLearnedWeights()
                 let started = Date()
                 var timings = SearchTimings()
                 var mark = DispatchTime.now()
                 do {
                     try Task.checkCancellation()
-                    let text = eligible(try textCandidates(plan: plan), plan: plan)
+                    let text = engine.eligible(try engine.textCandidates(plan: plan), plan: plan)
                     timings.record("text", since: mark); mark = DispatchTime.now()
-                    let fused = fuse(text)
+                    let fused = engine.fuse(text)
                     timings.record("fuse", since: mark); mark = DispatchTime.now()
-                    let fast = try build(results: fused)
+                    let fast = try engine.build(results: fused)
                     timings.record("hydrate", since: mark); mark = DispatchTime.now()
                     try Task.checkCancellation()
 
@@ -397,16 +436,16 @@ public struct SearchEngine: Sendable {
                         return
                     }
 
-                    let visual = eligible(
-                        try await visualCandidates(
+                    let visual = engine.eligible(
+                        try await engine.visualCandidates(
                             plan: plan, vectorIndex: vectorIndex, timings: &timings),
                         plan: plan)
                     mark = DispatchTime.now()
                     try Task.checkCancellation()
-                    let refinedFusion = fuse(text + visual)
+                    let refinedFusion = engine.fuse(text + visual)
                     timings.record("fuse2", since: mark); mark = DispatchTime.now()
-                    let refinedRanking = rank(refinedFusion)
-                    let refined = try assemble(refinedRanking)
+                    let refinedRanking = engine.rank(refinedFusion)
+                    let refined = try engine.assemble(refinedRanking)
                     timings.record("hydrate2", since: mark)
                     try Task.checkCancellation()
 
@@ -424,10 +463,10 @@ public struct SearchEngine: Sendable {
                     }
 
                     mark = DispatchTime.now()
-                    let reranked = await rerank(refinedRanking, plan: plan)
+                    let reranked = await engine.rerank(refinedRanking, plan: plan)
                     timings.record("rerank", since: mark); mark = DispatchTime.now()
                     try Task.checkCancellation()
-                    let final = try assemble(reranked)
+                    let final = try engine.assemble(reranked)
                     timings.record("hydrate3", since: mark)
                     continuation.yield(SearchUpdate(
                         phase: .reranked,
@@ -502,7 +541,9 @@ public struct SearchEngine: Sendable {
             : nil
 
         let hits: [VectorIndex.Hit]
-        if let vectorIndex, await vectorIndex.count > 0 {
+        if let vectorIndex, await vectorIndex.modelID == options.variant.modelID,
+           await vectorIndex.count > 0,
+           await vectorIndex.count == (try store.embeddingCount(modelID: options.variant.modelID)) {
             hits = try await vectorIndex.search(query, limit: options.channelDepth)
         } else {
             // Exact scan. Slower at millions of moments, but correct — and
@@ -560,12 +601,25 @@ public struct SearchEngine: Sendable {
         let usable = hits.filter { surprise($0) >= entryFloor }
         let moments = try store.moments(ids: usable.map(\.momentID))
         timings.record("moments", since: mark)
-        // Every phrase, not just the first. The vector actually searched with is
-        // the *average* of the ensemble, so naming one phrase as the reason was
-        // a small lie in the one place the product promises not to tell them.
-        let phrase = plan.visualPhrases.isEmpty
-            ? plan.rawQuery
-            : plan.visualPhrases.joined(separator: " / ")
+        // The phrase actually searched with is the *average* of the ensemble, and
+        // naming only the first one was a small lie in the one place the product
+        // promises not to tell them. Printing all four is the opposite mistake:
+        // caption templates made the line unreadable —
+        //
+        //     "Sunset in front of the sea / a photo of Sunset in front of the
+        //      sea / a video frame of Sunset in front of the sea / sunset
+        //      frente sea"
+        //
+        // So it says the best phrasing and admits how many others were averaged
+        // in with it.
+        let phrase: String
+        if plan.visualPhrases.isEmpty {
+            phrase = plan.rawQuery
+        } else if plan.visualPhrases.count == 1 {
+            phrase = plan.visualPhrases[0]
+        } else {
+            phrase = "\(plan.visualPhrases[0]) (+\(plan.visualPhrases.count - 1) phrasings)"
+        }
         return usable.enumerated().compactMap { position, hit in
             guard let moment = moments[hit.momentID] else { return nil }
             // Cosine is already an absolute scale for a given model, so the
@@ -1027,6 +1081,20 @@ public struct SearchEngine: Sendable {
 
     private typealias Ranked = (candidate: FusedCandidate, score: Double, confidence: Double)
 
+    private static func precedes(_ lhs: Ranked, _ rhs: Ranked) -> Bool {
+        if lhs.score != rhs.score { return lhs.score > rhs.score }
+        if lhs.confidence != rhs.confidence { return lhs.confidence > rhs.confidence }
+        if lhs.candidate.assetID != rhs.candidate.assetID { return lhs.candidate.assetID < rhs.candidate.assetID }
+        if lhs.candidate.start != rhs.candidate.start { return lhs.candidate.start < rhs.candidate.start }
+        return (lhs.candidate.momentID ?? -1) < (rhs.candidate.momentID ?? -1)
+    }
+
+    private func preferenceMultiplier(_ candidate: FusedCandidate) -> Double {
+        let channels = Set(candidate.evidence.map(\.channel)).sorted()
+        guard !channels.isEmpty, !learned.isEmpty else { return 1 }
+        return channels.reduce(0) { $0 + (learned[$1]?.multiplier ?? 1) } / Double(channels.count)
+    }
+
     /// Orders and trims, without touching the database.
     ///
     /// Split out from assembly so a second pass can reorder what the first pass
@@ -1038,15 +1106,14 @@ public struct SearchEngine: Sendable {
         // puts the better-evidenced of two equals first.
         let scored: [Ranked] = fused
             .map { (candidate: $0, score: ordering($0), confidence: confidence($0)) }
-            .sorted {
-                $0.score == $1.score ? $0.confidence > $1.confidence : $0.score > $1.score
-            }
+            .sorted(by: Self.precedes)
 
-        var top = Array(scored.prefix(options.limit * 3))
+        var top = Array(scored.filter { $0.confidence >= options.minimumConfidence }
+            .prefix(max(0, options.limit) * 3))
         if options.suppressNearDuplicates {
             top = suppressDuplicates(top)
         }
-        top = Array(top.prefix(options.limit))
+        top = Array(top.prefix(max(0, options.limit)))
 
         // Deliberately *not* rescaled so the best hit reads 100%. A weak match
         // should look weak, even when it is the best thing in the library.
@@ -1124,9 +1191,7 @@ public struct SearchEngine: Sendable {
                 previous * (1 - settings.authority) + calibrated * settings.authority
             updated[row] = (candidate, ordering(candidate), confidence(candidate))
         }
-        return updated.sorted {
-            $0.score == $1.score ? $0.confidence > $1.confidence : $0.score > $1.score
-        }
+        return updated.sorted(by: Self.precedes)
     }
 
     static func loadImage(atPath path: String) -> CGImage? {
@@ -1140,7 +1205,13 @@ public struct SearchEngine: Sendable {
         try assemble(rank(fused))
     }
 
-    private func assemble(_ top: [Ranked]) throws -> [SearchResult] {
+    private func assemble(_ admitted: [Ranked]) throws -> [SearchResult] {
+        // Selection, duplicate suppression and confidence were decided without
+        // learning. Only this final permutation is personalized.
+        let top = admitted.map { entry -> Ranked in
+            (entry.candidate, entry.score * preferenceMultiplier(entry.candidate), entry.confidence)
+        }.sorted(by: Self.precedes)
+
 
         let assetIDs = Array(Set(top.map(\.candidate.assetID)))
         let assets = try store.assets(ids: assetIDs)
@@ -1207,7 +1278,7 @@ public struct SearchEngine: Sendable {
             let previewPath = previewURL(cardIndex: cardIndex,
                                          momentID: entry.candidate.momentID)
 
-            return SearchResult(
+            var result = SearchResult(
                 assetID: entry.candidate.assetID,
                 momentID: entry.candidate.momentID,
                 displayName: asset.displayName,
@@ -1220,6 +1291,14 @@ public struct SearchEngine: Sendable {
                 previewPath: previewPath,
                 createdAt: asset.createdAt,
                 durationSeconds: asset.durationSeconds)
+            let boosted = Set(evidence.map(\.channel)).compactMap { learned[$0] }
+                .filter { $0.multiplier > 1 }.sorted { $0.channel < $1.channel }
+            if !boosted.isEmpty {
+                result.preferenceExplanation = "Orden adaptado por tu uso: " + boosted.map {
+                    "\($0.channel) (\($0.rewards) acciones positivas)"
+                }.joined(separator: ", ")
+            }
+            return result
         }
     }
 

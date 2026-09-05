@@ -96,7 +96,7 @@ public struct LibraryScanner: Sendable {
 
         var seenPaths: Set<String> = []
 
-        while let next = enumerator.nextObject() {
+        while let next = BackgroundIO.run({ enumerator.nextObject() }) {
             try Task.checkCancellation()
             if report.filesSeen > 0, report.filesSeen % 64 == 0 {
                 try await waitForDiscoveryPermission()
@@ -106,7 +106,7 @@ public struct LibraryScanner: Sendable {
                 enumerator.skipDescendants()
                 continue
             }
-            guard let values = try? url.resourceValues(forKeys: Set(keys)),
+            guard let values = try? BackgroundIO.run({ try url.resourceValues(forKeys: Set(keys)) }),
                   values.isRegularFile == true else { continue }
             guard let kind = MediaProbe.mediaType(for: url) else { continue }
 
@@ -131,6 +131,8 @@ public struct LibraryScanner: Sendable {
                 case .rebound: report.rebound += 1
                 case .renamed: report.renamed += 1
                 }
+            } catch is CancellationError {
+                throw CancellationError()
             } catch {
                 report.errors.append("\(url.lastPathComponent): \(error.localizedDescription)")
             }

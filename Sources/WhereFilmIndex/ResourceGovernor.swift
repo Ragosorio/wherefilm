@@ -29,6 +29,7 @@ public enum ThrottleReason: String, Sendable {
     case editorInForeground
     case editorRunning
     case searchActive
+    case outsideSchedule
 
     public var label: String {
         switch self {
@@ -41,6 +42,7 @@ public enum ThrottleReason: String, Sendable {
         case .editorInForeground: "Paused — you're editing"
         case .editorRunning: "Light mode — an editor is open"
         case .searchActive: "Paused — search has priority"
+        case .outsideSchedule: "Paused — outside indexing hours"
         }
     }
 }
@@ -109,6 +111,7 @@ public struct ResourceGovernor: Sendable {
         public var mode: IndexerMode = .smart
         /// Set by "Pause for 2h" in the menu bar.
         public var pausedUntil: Date?
+        public var indexingWindow: IndexingWindow?
         /// In Smart mode, back off when one of these is running, and yield all
         /// expensive work when one is frontmost.
         public var editorBundleIDs: Set<String> = [
@@ -172,6 +175,11 @@ public struct ResourceGovernor: Sendable {
         if let until = settings.pausedUntil, until > now {
             return GovernorDecision(allowedTasks: [], concurrency: 0,
                                     scanConcurrency: 0, reason: .userPaused)
+        }
+
+        if let window = settings.indexingWindow, !window.contains(now) {
+            return GovernorDecision(allowedTasks: [], concurrency: 0,
+                                    scanConcurrency: 0, reason: .outsideSchedule)
         }
 
         switch settings.mode {

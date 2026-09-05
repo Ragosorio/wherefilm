@@ -172,6 +172,9 @@ func detectFaces(_ image: CGImage) async throws -> [Face] {
 
 // MARK: - Loop
 
+// This process exists only for indexing, so its disk policy cannot throttle
+// interactive search in the parent process.
+_ = setiopolicy_np(IOPOL_TYPE_DISK, IOPOL_SCOPE_PROCESS, IOPOL_THROTTLE)
 let input = FileHandle.standardInput
 let output = FileHandle.standardOutput
 let decoder = JSONDecoder()

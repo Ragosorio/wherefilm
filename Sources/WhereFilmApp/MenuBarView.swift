@@ -198,6 +198,7 @@ struct MenuBarView: View {
         case .editorInForeground: "Esperando mientras editas"
         case .editorRunning: "Modo ligero · editor abierto"
         case .searchActive: "Búsqueda con prioridad"
+        case .outsideSchedule: "Esperando el horario de indexación"
         }
     }
 

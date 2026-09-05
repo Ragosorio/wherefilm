@@ -23,7 +23,7 @@ struct WhereFilm: AsyncParsableCommand {
         version: "0.1.0",
         subcommands: [Scan.self, Index.self, Search.self, Status.self,
                       Volumes.self, Doctor.self, Rebuild.self, Tokenize.self,
-                      Eval.self, People.self, BenchmarkFixture.self],
+                      Eval.self, People.self, Usage.self, Sidecar.self, BenchmarkFixture.self],
         defaultSubcommand: Status.self)
 }
 
@@ -41,8 +41,12 @@ struct StoreOptions: ParsableArguments {
     }
 }
 
-func makeVectorIndex(variant: MobileCLIPVariant) throws -> VectorIndex {
-    try VectorIndex(modelID: variant.modelID, dimensions: variant.dimensions)
+func makeVectorIndex(variant: MobileCLIPVariant, store: IndexStore) throws -> VectorIndex {
+    let database = URL(fileURLWithPath: store.dbPool.path).standardizedFileURL
+    let directory = database == AppPaths.database.standardizedFileURL
+        ? AppPaths.vectorIndexes
+        : database.deletingLastPathComponent().appendingPathComponent(database.lastPathComponent + "-Vectors")
+    return try VectorIndex(modelID: variant.modelID, dimensions: variant.dimensions, directory: directory)
 }
 
 // MARK: - scan
@@ -133,6 +137,9 @@ struct Index: AsyncParsableCommand {
     @Option(name: .long, help: "How many jobs to run at once. Defaults to what the governor allows.")
     var concurrency: Int?
 
+    @Option(name: .long, help: "Daily local indexing window, e.g. 23:00-07:00. Also respected at full speed.")
+    var window: String?
+
     func run() async throws {
         let store = try storeOptions.makeStore()
         guard let variant = MobileCLIPVariant(rawValue: model) else {
@@ -143,17 +150,19 @@ struct Index: AsyncParsableCommand {
             : tasks.compactMap { JobTask(rawValue: $0) }
         guard !selected.isEmpty else { throw ValidationError("No valid tasks given.") }
 
+        let schedule = window.flatMap(IndexingWindow.init)
+        if window != nil, schedule == nil { throw ValidationError("Use HH:mm-HH:mm, for example 23:00-07:00.") }
         try await Self.runIndexing(store: store, limit: limit, tasks: selected,
                                    variant: variant, fullSpeed: fullSpeed, quiet: false,
                                    recognizeText: !noOcr, detectFaces: faces,
-                                   concurrency: concurrency)
+                                   concurrency: concurrency, window: schedule)
     }
 
     static func runIndexing(store: IndexStore, limit: Int, tasks: [JobTask],
                             variant: MobileCLIPVariant, fullSpeed: Bool, quiet: Bool,
                             recognizeText: Bool = true, detectFaces: Bool = false,
-                            concurrency: Int? = nil) async throws {
-        let vectorIndex = try makeVectorIndex(variant: variant)
+                            concurrency: Int? = nil, window: IndexingWindow? = nil) async throws {
+        let vectorIndex = try makeVectorIndex(variant: variant, store: store)
 
         var indexerOptions = Indexer.Options()
         indexerOptions.variant = variant
@@ -162,6 +171,7 @@ struct Index: AsyncParsableCommand {
 
         var governorSettings = ResourceGovernor.Settings()
         governorSettings.mode = fullSpeed ? .fullSpeed : .smart
+        governorSettings.indexingWindow = window
 
         let indexer = Indexer(store: store, vectorIndex: vectorIndex,
                               options: indexerOptions,
@@ -170,7 +180,11 @@ struct Index: AsyncParsableCommand {
         let decision = ResourceGovernor(settings: governorSettings).decide()
         if !decision.isWorking {
             print("Indexer is throttled: \(decision.reason.label).")
-            print("Use --full-speed to override, or close your editor.")
+            if decision.reason == .outsideSchedule {
+                print("Run again during the configured hours. The app resumes automatically while running.")
+            } else {
+                print("Use --full-speed to override battery/editor throttling; critical heat still pauses work.")
+            }
             return
         }
 
@@ -209,7 +223,7 @@ struct Index: AsyncParsableCommand {
             return
         }
         let processed = await indexer.drain(allowedTasks: allowed, limit: limit,
-                                            concurrency: concurrency)
+                                            concurrency: concurrency, honorGovernor: true)
         let elapsed = Date().timeIntervalSince(start)
 
         print("\nProcessed \(processed) jobs in \(String(format: "%.1f", elapsed))s.")
@@ -242,6 +256,9 @@ struct Search: AsyncParsableCommand {
 
     @Flag(name: .long, help: "Skip the Apple on-device model even if it's available.")
     var noLLM = false
+
+    @Flag(name: .long, help: "Apply this catalog's experimental learned ordering.")
+    var learnedWeights = false
 
     @Option(name: .long, help: "Cosine similarity below which a visual hit is discarded.")
     var minVisual: Float?
@@ -279,11 +296,12 @@ struct Search: AsyncParsableCommand {
             print("")
         }
 
-        let vectorIndex = try makeVectorIndex(variant: variant)
+        let vectorIndex = try makeVectorIndex(variant: variant, store: store)
         try? await vectorIndex.openForSearch()
 
         var options = SearchEngine.Options()
         options.limit = limit
+        options.usesLearnedWeights = learnedWeights
         options.variant = variant
         if let channelDepth { options.channelDepth = channelDepth }
         if let minVisual { options.weights.minimumVisualSimilarity = minVisual }
@@ -581,7 +599,7 @@ struct Rebuild: AsyncParsableCommand {
         }
 
         print("Rebuilding \(variant.modelID) from \(total) stored vectors…")
-        let vectorIndex = try makeVectorIndex(variant: variant)
+        let vectorIndex = try makeVectorIndex(variant: variant, store: store)
         let start = Date()
         try await vectorIndex.rebuild(from: store) { done in
             FileHandle.standardError.write(Data("  \(done)/\(total)\r".utf8))

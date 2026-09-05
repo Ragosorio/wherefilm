@@ -221,18 +221,23 @@ public actor Indexer {
     /// endless loop would be unhelpful.
     @discardableResult
     public func drain(allowedTasks: [JobTask] = JobTask.allCases, limit: Int = .max,
-                      concurrency: Int? = nil) async -> Int {
+                      concurrency: Int? = nil, honorGovernor: Bool = false) async -> Int {
         try? store.requeueStaleJobs()
         try? await vectorIndex.openForWriting()
         let width = max(1, concurrency ?? governor.decide().concurrency)
         let options = self.options
         var processed = 0
-        while processed < limit {
+        while processed < limit, !Task.isCancelled {
+            let decision = governor.decide()
+            let permitted = honorGovernor ? allowedTasks.filter(decision.allowedTasks.contains) : allowedTasks
+            guard !permitted.isEmpty else { break }
+            let currentWidth = honorGovernor ? min(width, decision.concurrency) : width
+            guard currentWidth > 0 else { break }
             // Never start more workers than jobs we are still allowed to run.
-            let wave = min(width, limit - processed)
+            let wave = min(currentWidth, limit - processed)
             let done = await withTaskGroup(of: Bool.self) { group -> Int in
                 for _ in 0..<wave {
-                    group.addTask { await self.runOnce(allowedTasks: allowedTasks, options: options) }
+                    group.addTask { await self.runOnce(allowedTasks: permitted, options: options) }
                 }
                 var count = 0
                 for await didWork in group where didWork { count += 1 }

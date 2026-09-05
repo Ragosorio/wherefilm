@@ -23,6 +23,21 @@ final class AppModel {
     var pausedUntil: Date? {
         didSet { applyGovernorSettings() }
     }
+    var scheduledIndexing = UserDefaults.standard.bool(forKey: "wherefilm.scheduledIndexing") {
+        didSet { UserDefaults.standard.set(scheduledIndexing, forKey: "wherefilm.scheduledIndexing"); applyGovernorSettings() }
+    }
+    var indexingStartHour = UserDefaults.standard.object(forKey: "wherefilm.indexingStartHour") as? Int ?? 23 {
+        didSet { UserDefaults.standard.set(indexingStartHour, forKey: "wherefilm.indexingStartHour"); applyGovernorSettings() }
+    }
+    var indexingEndHour = UserDefaults.standard.object(forKey: "wherefilm.indexingEndHour") as? Int ?? 7 {
+        didSet { UserDefaults.standard.set(indexingEndHour, forKey: "wherefilm.indexingEndHour"); applyGovernorSettings() }
+    }
+    private(set) var learnsFromUsage = false
+    var usageStatus: String?
+    private var displayedQuery = ""
+    private var displayedAt = Date.distantFuture
+    private var openedDisplayedQuery = false
+
     var throttleReason: ThrottleReason = .none
     var currentActivity: String?
 
@@ -31,6 +46,7 @@ final class AppModel {
     var volumes: [Volume] = []
     var libraries: [URL] = []
     var libraryError: String?
+    var isTransferringIndex = false
 
     // Search state.
     var query = ""
@@ -106,6 +122,7 @@ final class AppModel {
             let vectorIndex = try VectorIndex(modelID: variant.modelID,
                                               dimensions: variant.dimensions)
             self.store = store
+            learnsFromUsage = try store.usageLearningEnabled()
             self.vectorIndex = vectorIndex
 
             var options = Indexer.Options()
@@ -213,8 +230,13 @@ final class AppModel {
     func refresh() async {
         guard let store else { return }
         stats = (try? store.stats()) ?? stats
+        learnsFromUsage = (try? store.usageLearningEnabled()) ?? learnsFromUsage
         volumes = (try? store.volumes()) ?? volumes
         let decision = ResourceGovernor(settings: governorSettings).decide()
+        if decision.scanConcurrency == 0, libraryScanWorkerTask != nil {
+            libraryScanNeedsRun = true
+            libraryScanWorkerTask?.cancel()
+        }
         // A restricted decision can still allow cheap metadata work. Reporting
         // that as simply "working" hid the fact that visual/transcription jobs
         // were intentionally deferred on battery.
@@ -232,6 +254,10 @@ final class AppModel {
         var settings = ResourceGovernor.Settings()
         settings.mode = mode
         settings.pausedUntil = pausedUntil
+        if scheduledIndexing, ProcessInfo.processInfo.environment["WHEREFILM_QA_REPORT"] == nil {
+            settings.indexingWindow = IndexingWindow(startMinute: indexingStartHour * 60,
+                                                     endMinute: indexingEndHour * 60)
+        }
         return settings
     }
 
@@ -239,7 +265,7 @@ final class AppModel {
         guard let indexer else { return }
         let settings = governorSettings
         Task { await indexer.setGovernorSettings(settings) }
-        let paused = mode == .paused || (pausedUntil ?? .distantPast) > Date()
+        let paused = ResourceGovernor(settings: settings).decide().scanConcurrency == 0
         if paused {
             // A large directory walk can outlive a menu-bar pause. Cancel the
             // actual detached worker, not only the MainActor watcher awaiting it.
@@ -496,6 +522,101 @@ final class AppModel {
         }
     }
 
+    // MARK: - Portable catalogs
+
+    func exportVolume(_ volume: Volume) {
+        guard let store, !isTransferringIndex else { return }
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = "WhereFilm-\(volume.volumeUUID).wfindex"
+        panel.message = "Exporta texto, vectores visuales y timecodes. No incluye originales, vistas previas, personas ni historial de uso."
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        isTransferringIndex = true
+        Task {
+            defer { isTransferringIndex = false }
+            do {
+                let manifest = try await Task.detached(priority: .background) {
+                    try PortableCatalog.export(store: store, volumeUUID: volume.volumeUUID, to: url)
+                }.value
+                usageStatus = "Índice exportado: \(manifest.assets) archivos, \(manifest.moments) momentos."
+            } catch { usageStatus = error.localizedDescription }
+        }
+    }
+
+    func importSidecar() {
+        guard let store, !isTransferringIndex else { return }
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.message = "Selecciona una carpeta .wfindex. Conservaremos tus análisis existentes."
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        isTransferringIndex = true
+        Task {
+            defer { isTransferringIndex = false }
+            await indexer?.beginInteractiveSearch()
+            do {
+                let report = try await Task.detached(priority: .background) {
+                    try PortableCatalog.importCatalog(from: url, into: store)
+                }.value
+                if report.addedMoments > 0 { try await vectorIndex?.rebuild(from: store) }
+                usageStatus = "Importados \(report.addedAssets) archivos y \(report.addedMoments) momentos. Añade el disco para abrir los originales."
+                await refresh()
+            } catch { usageStatus = error.localizedDescription }
+            await indexer?.endInteractiveSearch()
+        }
+    }
+
+    // MARK: - Local learning
+
+    func setLearnsFromUsage(_ enabled: Bool) {
+        do {
+            try store?.setUsageLearningEnabled(enabled)
+            learnsFromUsage = enabled
+            usageStatus = enabled ? "Aprendizaje local activado; necesita 200 acciones." : "Aprendizaje desactivado."
+            Task { await runSearch() }
+        } catch { usageStatus = error.localizedDescription }
+    }
+
+    func forgetUsage() {
+        do {
+            try store?.forgetUsage()
+            displayedQuery = ""
+            usageStatus = "Historial borrado. Pesos originales restaurados."
+            Task { await runSearch() }
+        } catch { usageStatus = error.localizedDescription }
+    }
+
+    func inspectUsage() {
+        guard let report = try? store?.usageReport() else { return }
+        usageStatus = "\(report.interactions) acciones locales. " + (report.channels.isEmpty
+            ? "Todavía sin ajuste de orden."
+            : report.channels.map { "\($0.channel): ×\(String(format: "%.2f", $0.multiplier))" }.joined(separator: ", "))
+    }
+
+    func exportUsage() {
+        guard let store else { return }
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = "wherefilm-uso.json"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            try encoder.encode(store.usageReport()).write(to: url, options: .atomic)
+            usageStatus = "Resumen exportado."
+        } catch { usageStatus = error.localizedDescription }
+    }
+
+    func recordOpen(_ result: SearchResult) {
+        guard learnsFromUsage, !displayedQuery.isEmpty else { return }
+        openedDisplayedQuery = true
+        do {
+            try store?.record(action: .open, query: displayedQuery, assetID: result.assetID,
+                              momentID: result.momentID,
+                              rank: results.firstIndex { $0.momentKey == result.momentKey }.map { $0 + 1 },
+                              channels: result.evidence.map(\.channel))
+        } catch { usageStatus = error.localizedDescription }
+    }
+
     // MARK: - Search
 
     /// Called as the query changes. Ninety milliseconds is long enough to avoid
@@ -580,6 +701,7 @@ final class AppModel {
 
             var options = SearchEngine.Options()
             options.limit = 30
+            options.usesLearnedWeights = learnsFromUsage
             options.variant = variant
             options.weights.minimumVisualSimilarity = precision.minimumVisualSimilarity
             options.minimumConfidence = precision.minimumConfidence
@@ -603,6 +725,18 @@ final class AppModel {
                 // Do not flash an empty fast snapshot over useful results from
                 // the previous prefix. The final empty snapshot is authoritative.
                 if !update.results.isEmpty || update.isFinal {
+                    if displayedQuery != text {
+                        // Debounced prefixes are not negative examples. Only a
+                        // settled result set seen for 3 seconds can be abandoned.
+                        if learnsFromUsage, !openedDisplayedQuery,
+                           Date().timeIntervalSince(displayedAt) >= 3, !displayedQuery.isEmpty {
+                            try? store.record(action: .reformulate, query: displayedQuery,
+                                              channels: Array(Set(results.flatMap { $0.evidence.map(\.channel) })))
+                        }
+                        displayedQuery = text
+                        displayedAt = Date()
+                        openedDisplayedQuery = false
+                    }
                     results = update.results
                 }
                 if !update.results.isEmpty {

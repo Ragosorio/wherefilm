@@ -329,6 +329,52 @@ public enum Schema {
                 """)
         }
 
+        // What somebody did with the answers.
+        //
+        // The channel weights — 0.45 visual, 0.35 transcript, and so on — are a
+        // reasonable guess made once, on one machine, about every library that
+        // will ever exist. An archive of silent b-roll and an archive of
+        // interviews do not want the same numbers, and only one person can say
+        // which is which: the one opening the results.
+        //
+        // Query text is omitted. Hashes still describe usage and are treated as
+        // private data: neither usage nor its hashing key belongs in a sidecar.
+        migrator.registerMigration("v8-interactions") { db in
+            try db.create(table: "interactions") { t in
+                t.autoIncrementedPrimaryKey("id")
+                t.column("queryHash", .text).notNull()
+                t.column("assetID", .integer)
+                t.column("momentID", .integer)
+                t.column("action", .text).notNull()
+                t.column("rank", .integer)
+                t.column("dwellMilliseconds", .integer)
+                // The evidence that was on the card, so a preference can be
+                // attributed to a channel rather than to a file.
+                t.column("channels", .text)
+                t.column("createdAt", .datetime).notNull()
+            }
+            try db.create(index: "idx_interactions_time", on: "interactions",
+                          columns: ["createdAt"])
+        }
+
+        migrator.registerMigration("v9-usage-state") { db in
+            try db.execute(sql: """
+                CREATE TABLE usage_state (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    revision INTEGER NOT NULL DEFAULT 0,
+                    enabled INTEGER NOT NULL DEFAULT 0,
+                    queryKey BLOB NOT NULL DEFAULT (randomblob(32))
+                );
+                INSERT INTO usage_state(id) VALUES (1);
+                CREATE TRIGGER interactions_insert AFTER INSERT ON interactions BEGIN
+                    UPDATE usage_state SET revision = revision + 1 WHERE id = 1;
+                END;
+                CREATE TRIGGER interactions_delete AFTER DELETE ON interactions BEGIN
+                    UPDATE usage_state SET revision = revision + 1 WHERE id = 1;
+                END;
+                """)
+        }
+
         return migrator
     }
 }

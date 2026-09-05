@@ -1017,6 +1017,12 @@ misma lección, aplicada al mismo problema.
 
 ## 8. Fases, entregables y criterios de aceptación
 
+> **Estado, 2026-09-05:** las fases 7 a 13 y la 15 están implementadas; la 14
+> (voces) no, porque depende de una librería externa que además es sólo para
+> Apple Silicon. Los resultados medidos — incluidos los que no salieron como se
+> esperaba — están en
+> [`PRECISION-PASS-2026-09-05.md`](PRECISION-PASS-2026-09-05.md).
+
 Orden pensado para que **cada fase sea demostrable por sí sola** y ninguna
 dependa de que la siguiente exista.
 
