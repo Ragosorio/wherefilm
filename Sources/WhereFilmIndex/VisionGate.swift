@@ -1,4 +1,5 @@
 import Foundation
+import WhereFilmCore
 
 /// Caps how many Vision requests are in flight across the whole process.
 ///
@@ -66,8 +67,12 @@ public actor VisionGate {
     /// The deepest queue TextRecognition survives, bounded again by the cores
     /// available so a small Mac never hands Vision its whole cooperative pool.
     public static var recommendedLimit: Int {
-        let cores = ProcessInfo.processInfo.activeProcessorCount
-        return max(1, min(Self.crashCeiling, cores - 2))
+        let profile = MachineProfile.current
+        // Performance cores, not logical ones. A 2019 i9 reports sixteen logical
+        // cores for eight real ones, and handing Vision a budget derived from
+        // hyperthreads is how a machine ends up with nothing left to drain the
+        // queue everything is waiting on.
+        return max(1, min(Self.crashCeiling, profile.performanceCores - 2))
     }
 
     /// The measured limit of Apple's framework. Raising this is a correctness

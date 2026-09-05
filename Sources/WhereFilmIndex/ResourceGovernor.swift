@@ -145,7 +145,16 @@ public struct ResourceGovernor: Sendable {
         /// number: `WorkBudget` caps decoded frames in flight, so a wave of video
         /// passes self-limits to a couple at a time while a wave of stills runs
         /// wide. Past the core count there is nothing left to win.
-        public var maxConcurrency = max(2, min(12, ProcessInfo.processInfo.activeProcessorCount))
+        ///
+        /// Split by machine, because the measurement above was taken on one with
+        /// a neural engine. There, twelve workers are mostly *waiting* — on the
+        /// ANE, on the disk, on Vision — and oversubscribing is free. Without
+        /// one, every worker is doing CPU arithmetic in the same pool, so past
+        /// the real cores they only take turns more expensively, and a 2019 i9
+        /// starts thermally throttling while they do it.
+        public var maxConcurrency = MachineProfile.current.hasNeuralEngine
+            ? max(2, min(12, MachineProfile.current.cores))
+            : max(2, min(6, MachineProfile.current.performanceCores))
 
         public init() {}
     }

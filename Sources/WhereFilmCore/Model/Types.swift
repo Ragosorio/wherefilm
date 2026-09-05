@@ -191,10 +191,14 @@ public struct TranscriptChunk: Codable, Sendable, FetchableRecord, MutablePersis
     public var text: String
     public var confidence: Double?
     public var locale: String?
+    /// Which speech engine produced this, so a library transcribed by the
+    /// fallback can be found and redone on better hardware.
+    public var engine: String?
 
     public init(chunkID: Int64? = nil, assetID: Int64, startSeconds: Double,
                 endSeconds: Double, text: String, confidence: Double? = nil,
-                locale: String? = nil) {
+                locale: String? = nil, engine: String? = nil) {
+        self.engine = engine
         self.chunkID = chunkID
         self.assetID = assetID
         self.startSeconds = startSeconds

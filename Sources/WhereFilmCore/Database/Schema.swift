@@ -185,6 +185,24 @@ public enum Schema {
                 """)
         }
 
+        // Which engine produced a piece of derived text.
+        //
+        // `embeddings.modelID` has always recorded this for vectors, and the
+        // reason is worth repeating for text: macOS 26 is the last release that
+        // runs on Intel Macs, which have no neural engine and therefore fall back
+        // from `SpeechTranscriber` to `DictationTranscriber`. A library
+        // transcribed by the weaker engine should be *findable* later, so it can
+        // be redone on better hardware — the same way an old model's embeddings
+        // can be reindexed in the background instead of migrated destructively.
+        migrator.registerMigration("v5-derivation-provenance") { db in
+            try db.alter(table: "transcript_chunks") { table in
+                table.add(column: "engine", .text)
+            }
+            try db.alter(table: "ocr_texts") { table in
+                table.add(column: "engine", .text)
+            }
+        }
+
         return migrator
     }
 }

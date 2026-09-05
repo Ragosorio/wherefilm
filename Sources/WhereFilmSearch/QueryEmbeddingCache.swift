@@ -1,4 +1,5 @@
 import Foundation
+import WhereFilmCore
 import WhereFilmML
 
 /// Small, process-local cache for the expensive half of a visual query.
@@ -74,7 +75,13 @@ actor QueryEmbeddingCache: QueryEmbeddingProviding {
         if let loaded = encoders[variant.modelID] {
             encoder = loaded
         } else {
-            encoder = try MobileCLIPTextEncoder(variant: variant)
+            // Searching is interactive and short, so it never yields the GPU
+            // the way background indexing does: on a Mac without a neural
+            // engine, a query the person is waiting on may use whatever silicon
+            // finishes it fastest.
+            encoder = try MobileCLIPTextEncoder(
+                variant: variant,
+                computeUnits: ComputePolicy.imageEncoding(editorRunning: false))
             encoders[variant.modelID] = encoder
         }
 

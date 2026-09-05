@@ -1,4 +1,5 @@
 import Foundation
+import WhereFilmCore
 
 /// Caps how many full-resolution stills are being decoded at once.
 ///
@@ -19,7 +20,13 @@ public actor DecodeGate {
     /// Enough to keep the disk and the JPEG decoder busy, few enough that the
     /// spike stays bounded on a 16 GB machine.
     public static var recommendedLimit: Int {
-        max(2, min(4, ProcessInfo.processInfo.activeProcessorCount / 3))
+        // Deliberately still counted in logical cores, not performance cores.
+        // The thing being bounded here is a *memory spike*, and a decode running
+        // on an efficiency core occupies exactly as many megabytes as one running
+        // on a performance core. Narrowing this to performance cores took the M4
+        // from three concurrent decodes to two for no measured reason, which is
+        // how an adaptation becomes a regression.
+        max(2, min(4, MachineProfile.current.cores / 3))
     }
 
     private let limit: Int

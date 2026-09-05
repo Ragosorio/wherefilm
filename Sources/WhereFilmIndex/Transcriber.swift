@@ -63,6 +63,45 @@ public struct Transcriber: Sendable {
         self.options = options
     }
 
+    /// Which speech engine this machine can actually run.
+    ///
+    /// `SpeechTranscriber` is built around the neural engine, and macOS 26 is the
+    /// last release that runs on Intel Macs — which have none. Apple's own answer
+    /// to that is `DictationTranscriber`, documented as the fallback for devices
+    /// and locales `SpeechTranscriber` does not cover, and it supports the same
+    /// `audioTimeRange` attribute, which is the only part this product cannot
+    /// live without: a transcript with no timestamps cannot answer "jump to
+    /// 14:16".
+    ///
+    /// So the chain is: the good engine, then the available one, then nothing —
+    /// and "nothing" is reported honestly rather than left as an empty transcript
+    /// nobody can explain.
+    public enum Engine: Sendable, Equatable {
+        case speechTranscriber(Locale)
+        case dictation(Locale)
+
+        public var name: String {
+            switch self {
+            case .speechTranscriber: "SpeechTranscriber"
+            case .dictation: "DictationTranscriber"
+            }
+        }
+
+        public var locale: Locale {
+            switch self {
+            case .speechTranscriber(let locale), .dictation(let locale): locale
+            }
+        }
+
+        /// Stored with every chunk, so a library transcribed by the weaker engine
+        /// can be found and redone later — the same rule `modelID` follows for
+        /// embeddings. Being able to *improve* an index without rebuilding it is
+        /// the difference between a fallback and a dead end.
+        public var identifier: String {
+            "\(name.lowercased())-\(locale.identifier)"
+        }
+    }
+
     /// Locales the system can transcribe, whether or not the assets are
     /// downloaded yet. Always ask at runtime rather than hardcoding a list.
     public static func supportedLocales() async -> [Locale] {
@@ -73,13 +112,59 @@ public struct Transcriber: Sendable {
         await SpeechTranscriber.installedLocales
     }
 
+    public static func dictationLocales() async -> [Locale] {
+        await DictationTranscriber.supportedLocales
+    }
+
     public static var isAvailable: Bool { SpeechTranscriber.isAvailable }
 
+    /// Picks the best engine this Mac can run for a locale, or nil when neither
+    /// can.
+    public static func engine(for locale: Locale) async -> Engine? {
+        if SpeechTranscriber.isAvailable,
+           let supported = await SpeechTranscriber.supportedLocale(equivalentTo: locale) {
+            return .speechTranscriber(supported)
+        }
+        if let supported = await DictationTranscriber.supportedLocale(equivalentTo: locale) {
+            return .dictation(supported)
+        }
+        return nil
+    }
+
+    /// One line for `doctor`, so "why is nothing being transcribed?" has an
+    /// answer that does not require a debugger.
+    public static func engineDescription(for locale: Locale) async -> String {
+        guard let engine = await engine(for: locale) else {
+            return "no speech engine supports \(locale.identifier) on this Mac"
+        }
+        switch engine {
+        case .speechTranscriber(let supported):
+            return "SpeechTranscriber · \(supported.identifier)"
+        case .dictation(let supported):
+            return "DictationTranscriber · \(supported.identifier) "
+                + "— SpeechTranscriber is unavailable on this Mac"
+        }
+    }
+
     public func transcribe(url: URL) async throws -> [TranscriptSegment] {
-        guard let locale = await SpeechTranscriber.supportedLocale(equivalentTo: options.locale) else {
+        guard let engine = await Self.engine(for: options.locale) else {
             throw TranscriptionError.localeUnsupported(options.locale.identifier)
         }
+        switch engine {
+        case .speechTranscriber(let locale):
+            return try await transcribeWithSpeechTranscriber(locale: locale, url: url)
+        case .dictation(let locale):
+            return try await transcribeWithDictation(locale: locale, url: url)
+        }
+    }
 
+    /// The engine that will actually be used for this file, without running it.
+    public func resolvedEngine() async -> Engine? {
+        await Self.engine(for: options.locale)
+    }
+
+    private func transcribeWithSpeechTranscriber(locale: Locale,
+                                                 url: URL) async throws -> [TranscriptSegment] {
         let transcriber = SpeechTranscriber(
             locale: locale,
             transcriptionOptions: [],
@@ -146,9 +231,77 @@ public struct Transcriber: Sendable {
         return chunk(results)
     }
 
+    /// The same pipeline, driven by the engine a Mac without a neural engine
+    /// actually has.
+    ///
+    /// Everything below the module — pulling PCM out of the container, the
+    /// bounded eight-buffer queue, the timestamp counter, the chunking — is
+    /// shared, because none of it was ever specific to which recogniser was
+    /// listening. What differs is one type and one attribute scope, which is
+    /// exactly how much of this file should have to know about the difference.
+    private func transcribeWithDictation(locale: Locale,
+                                         url: URL) async throws -> [TranscriptSegment] {
+        let transcriber = DictationTranscriber(
+            locale: locale,
+            contentHints: [],
+            transcriptionOptions: [],
+            reportingOptions: [],
+            attributeOptions: [.audioTimeRange, .transcriptionConfidence])
+
+        try await ensureModelInstalled(for: transcriber, locale: locale)
+
+        guard let analyzerFormat = await SpeechAnalyzer.bestAvailableAudioFormat(
+            compatibleWith: [transcriber]) else {
+            throw TranscriptionError.audioFormatUnavailable
+        }
+
+        let (stream, continuation) = AsyncStream<AnalyzerInput>.makeStream(
+            bufferingPolicy: .bufferingOldest(max(1, options.audioBufferCapacity)))
+        let analyzer = SpeechAnalyzer(
+            modules: [transcriber],
+            options: .init(priority: options.priority, modelRetention: .whileInUse))
+
+        let collector = Task {
+            var collected: [(CMTimeRange, String, Double?)] = []
+            for try await result in transcriber.results {
+                var appendedTimedRun = false
+                for run in result.text.runs {
+                    guard let range = run.audioTimeRange else { continue }
+                    let text = String(result.text[run.range].characters)
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !text.isEmpty else { continue }
+                    collected.append((range, text, run.transcriptionConfidence))
+                    appendedTimedRun = true
+                }
+                if !appendedTimedRun {
+                    let text = String(result.text.characters)
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !text.isEmpty else { continue }
+                    collected.append((result.range, text, confidence(of: result.text)))
+                }
+            }
+            return collected
+        }
+
+        do {
+            try await analyzer.start(inputSequence: stream)
+            try await pumpAudio(url: url, into: continuation, format: analyzerFormat)
+            continuation.finish()
+            try await analyzer.finalizeAndFinishThroughEndOfInput()
+        } catch {
+            continuation.finish()
+            await analyzer.cancelAndFinishNow()
+            collector.cancel()
+            throw error
+        }
+
+        let results = try await collector.value
+        return chunk(results)
+    }
+
     // MARK: - Model assets
 
-    private func ensureModelInstalled(for transcriber: SpeechTranscriber, locale: Locale) async throws {
+    private func ensureModelInstalled(for transcriber: any SpeechModule, locale: Locale) async throws {
         let status = await AssetInventory.status(forModules: [transcriber])
         switch status {
         case .installed:

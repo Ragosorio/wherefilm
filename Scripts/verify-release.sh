@@ -4,6 +4,13 @@
 #
 #   ./Scripts/verify-release.sh
 #   ./Scripts/verify-release.sh build/WhereFilm.app
+#   ./Scripts/verify-release.sh --arch x86_64        # the Intel slice, via Rosetta
+#
+# The --arch run is the only Intel check available without an Intel Mac. It
+# proves the slice links, loads the bundled Core ML models, falls back from
+# SpeechTranscriber to DictationTranscriber, and answers the same six queries.
+# It proves nothing at all about speed: Rosetta translates, and USearch reports
+# `serial` there instead of the vector units a real Intel Mac has.
 #
 # What makes this worth having rather than trusting `swift test`: the unit tests
 # never touch the models inside the app bundle, never scan a folder, and never
@@ -20,9 +27,18 @@ set -uo pipefail
 
 cd "$(dirname "$0")/.."
 
-APP="${1:-build/WhereFilm.app}"
-BINARY="$APP/Contents/MacOS/WhereFilm"
 RUN_ARCH="${WHEREFILM_RUN_ARCH:-}"
+APP_ARGUMENT=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --arch) RUN_ARCH="${2:-}"; shift 2 ;;
+    --arch=*) RUN_ARCH="${1#*=}"; shift ;;
+    *) APP_ARGUMENT="$1"; shift ;;
+  esac
+done
+
+APP="${APP_ARGUMENT:-build/WhereFilm.app}"
+BINARY="$APP/Contents/MacOS/WhereFilm"
 EXPECTED_ARCHS="${WHEREFILM_EXPECTED_ARCHS:-arm64 x86_64}"
 
 [[ -x "$BINARY" ]] || {

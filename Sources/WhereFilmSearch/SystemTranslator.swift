@@ -31,8 +31,8 @@ import Translation
 ///  2. **Unavailable means degrade, never fail.** If the language pair is not
 ///     installed, this returns nil and the lexicon answers instead. Downloading
 ///     a language pack needs a UI the search path does not have.
-actor SystemTranslator {
-    static let shared = SystemTranslator()
+public actor SystemTranslator {
+    public static let shared = SystemTranslator()
 
     private var statuses: [String: Bool] = [:]
     private var cache: [String: String] = [:]
@@ -43,7 +43,7 @@ actor SystemTranslator {
     /// Whether the pair is installed *right now*. Only `.installed` counts:
     /// `.supported` means the model exists but is not on this Mac, and asking
     /// for it would need a download the search path cannot present.
-    func isAvailable(from source: Locale.Language, to target: Locale.Language) async -> Bool {
+    public func isAvailable(from source: Locale.Language, to target: Locale.Language) async -> Bool {
         let key = "\(source.languageCode?.identifier ?? "?")→\(target.languageCode?.identifier ?? "?")"
         if let known = statuses[key] { return known }
         let status = await LanguageAvailability().status(from: source, to: target)
@@ -52,7 +52,7 @@ actor SystemTranslator {
         return installed
     }
 
-    func translate(_ text: String,
+    public func translate(_ text: String,
                    from source: Locale.Language = Locale.Language(identifier: "es"),
                    to target: Locale.Language = Locale.Language(identifier: "en")) async -> String? {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -72,7 +72,7 @@ actor SystemTranslator {
     }
 
     /// Test seam.
-    func forget() {
+    public func forget() {
         cache.removeAll()
         statuses.removeAll()
     }

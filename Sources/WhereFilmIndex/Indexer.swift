@@ -1,5 +1,6 @@
 import Foundation
 import CoreGraphics
+import CoreML
 import WhereFilmCore
 import WhereFilmML
 
@@ -53,6 +54,10 @@ public actor Indexer {
     public var governor: ResourceGovernor
 
     private var imageEncoder: MobileCLIPImageEncoder?
+    /// Which compute units the resident encoder was built for, so a change in
+    /// policy — an editor opening on a Mac with no neural engine — actually
+    /// takes effect instead of being noticed and ignored.
+    private var loadedComputeUnits: MLComputeUnits?
     private var lastVisualWork = Date.distantPast
     private var activeInteractiveSearches = 0
     /// Progress reporting has to be callable from the nonisolated workers, so it
@@ -557,7 +562,11 @@ public actor Indexer {
 
         var transcriberOptions = Transcriber.Options(locale: options.transcriptionLocale)
         transcriberOptions.priority = .background
-        let segments = try await Transcriber(options: transcriberOptions).transcribe(url: url)
+        let transcriber = Transcriber(options: transcriberOptions)
+        // Resolved before the work, so the answer can be stored with the result
+        // and reported in the event even when the run finds nothing.
+        let engine = await transcriber.resolvedEngine()
+        let segments = try await transcriber.transcribe(url: url)
         guard !segments.isEmpty else { throw IndexerSkip(reason: "no speech found") }
 
         try store.deleteTranscript(assetID: assetID)
@@ -567,10 +576,12 @@ public actor Indexer {
                             endSeconds: segment.endSeconds,
                             text: segment.text,
                             confidence: segment.confidence,
-                            locale: options.transcriptionLocale.identifier)
+                            locale: options.transcriptionLocale.identifier,
+                            engine: engine?.identifier)
         })
         try store.addLevels(.spoken, to: assetID)
-        return "\(segments.count) transcript chunks"
+        let suffix = engine.map { $0.name == "SpeechTranscriber" ? "" : " (\($0.name))" } ?? ""
+        return "\(segments.count) transcript chunks\(suffix)"
     }
 
     // MARK: - Idle work
@@ -588,9 +599,14 @@ public actor Indexer {
 
     private func loadImageEncoder() throws -> MobileCLIPImageEncoder {
         lastVisualWork = Date()
-        if let imageEncoder { return imageEncoder }
-        let encoder = try MobileCLIPImageEncoder(variant: options.variant)
+        // Compute units are fixed when a model is loaded, so a change of policy
+        // means a reload. That is free here by construction: workers are
+        // disposable and the encoder is released after every idle gap anyway.
+        let units = ComputePolicy.imageEncoding(editorRunning: governor.isEditorRunning())
+        if let imageEncoder, loadedComputeUnits == units { return imageEncoder }
+        let encoder = try MobileCLIPImageEncoder(variant: options.variant, computeUnits: units)
         imageEncoder = encoder
+        loadedComputeUnits = units
         try store.register(model: ModelRecord(
             modelID: encoder.modelID, kind: "image-text",
             dimensions: encoder.dimensions, quantization: VectorQuantization.int8.rawValue))
@@ -603,6 +619,7 @@ public actor Indexer {
         guard force || Date().timeIntervalSince(lastVisualWork) > options.modelIdleTimeout else { return }
         let modelID = imageEncoder?.modelID ?? "?"
         imageEncoder = nil
+        loadedComputeUnits = nil
         emit(.modelReleased(modelID))
     }
 

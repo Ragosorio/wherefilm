@@ -387,6 +387,10 @@ struct StoreTests {
                 try db.execute(sql: "DROP TABLE IF EXISTS analysis_state")
                 try db.execute(sql: "DROP TABLE IF EXISTS search_vocab")
                 try db.execute(sql: "DROP INDEX IF EXISTS idx_ocr_asset")
+                // Columns count as schema too: leaving these behind would let
+                // the test pass against a migration that could never run twice.
+                try db.execute(sql: "ALTER TABLE transcript_chunks DROP COLUMN engine")
+                try db.execute(sql: "ALTER TABLE ocr_texts DROP COLUMN engine")
                 try db.execute(sql: "DELETE FROM grdb_migrations WHERE identifier <> 'v1'")
                 try db.execute(sql: "PRAGMA foreign_keys = ON")
             }

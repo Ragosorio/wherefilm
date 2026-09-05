@@ -1,4 +1,5 @@
 import Foundation
+import WhereFilmCore
 
 /// Bounds how much *decoded pixel data* the indexer may hold at once, measured
 /// in keyframes rather than in jobs.
@@ -44,8 +45,16 @@ public actor WorkBudget {
         // Two full video batches in flight plus headroom for light work. Below
         // this videos serialise; above it memory grows with nothing to show for
         // it (measured: 8 video workers cost 80 MB more than 2 and saved 0.7 s).
-        let cores = ProcessInfo.processInfo.activeProcessorCount
-        return max(12, min(32, cores * 2))
+        //
+        // Bounded by memory as well as by cores, which the core-count-only
+        // version was not. This is a budget denominated in decoded frames, and a
+        // frame costs the same number of bytes whatever the machine — so the
+        // ceiling has to know how many bytes there are. A 2019 i9 can report
+        // sixteen logical cores next to sixteen gigabytes shared with an editor.
+        let profile = MachineProfile.current
+        let byCores = profile.cores * 2
+        let byMemory = Int(profile.memoryGB * 1.5)
+        return max(8, min(32, min(byCores, byMemory)))
     }
 
     public static let shared = WorkBudget()

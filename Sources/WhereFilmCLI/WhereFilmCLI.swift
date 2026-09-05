@@ -1,5 +1,6 @@
 import Foundation
 import ArgumentParser
+import CoreML
 import Speech
 import WhereFilmCore
 import WhereFilmML
@@ -430,6 +431,25 @@ struct Doctor: AsyncParsableCommand {
     func run() async throws {
         print("WhereFilm doctor\n────────────────")
 
+        // The machine first, because almost everything below is a consequence of
+        // it. macOS 26 is the last release that runs on Intel, and on those Macs
+        // three of the capabilities in this report answer differently.
+        let machine = MachineProfile.current
+        print("\nMachine")
+        print("  \(machine.summary)")
+        let editorOpen = ResourceGovernor().isEditorRunning()
+        let units = ComputePolicy.imageEncoding(profile: machine, editorRunning: editorOpen)
+        print("  Core ML plan: \(Self.describe(units))"
+            + (editorOpen ? "  (an editor is open)" : ""))
+        if !machine.hasNeuralEngine {
+            print("  ⚠ no neural engine: indexing runs on CPU/GPU and will be markedly slower.")
+            print("    Searching is unaffected — it compares vectors that already exist.")
+        }
+        if machine.isTranslated {
+            print("  ⚠ this binary is running under Rosetta. Correctness here is meaningful;")
+            print("    timings are not.")
+        }
+
         print("\nVector engine")
         print("  USearch \(VectorEngineInfo.version)  [\(VectorEngineInfo.acceleration)]")
 
@@ -457,15 +477,22 @@ struct Doctor: AsyncParsableCommand {
             print("    ✓ \(locale.identifier)")
         }
         let current = Locale.current
-        if let match = await SpeechTranscriber.supportedLocale(equivalentTo: current) {
-            print("  your locale (\(current.identifier)) maps to \(match.identifier)")
-        } else {
-            print("  ⚠ your locale (\(current.identifier)) is not supported for transcription")
-        }
+        // What will actually run, rather than what would run on the machine this
+        // was written on. On a Mac without a neural engine this line is the
+        // difference between "no transcripts and no explanation" and a plain
+        // statement that the fallback engine is doing the work.
+        print("  engine for \(current.identifier): \(await Transcriber.engineDescription(for: current))")
 
         print("\nQuery understanding")
         print("  Apple Foundation Model: \(QueryPlanner.foundationModelStatus)")
-        print("  (optional — the built-in lexicon covers Spanish queries without it)")
+        let translation = await SystemTranslator.shared.isAvailable(
+            from: Locale.Language(identifier: "es"), to: Locale.Language(identifier: "en"))
+        print("  System translation es→en: \(translation ? "installed" : "not installed")")
+        if !translation {
+            print("    → open the Translate app once and download Spanish, or Settings ›")
+            print("      General › Language & Region › Translation Languages.")
+            print("      Without it, Spanish visual queries fall back to the built-in lexicon.")
+        }
 
         print("\nVector index")
         for variant in MobileCLIPVariant.allCases {
@@ -492,6 +519,16 @@ struct Doctor: AsyncParsableCommand {
         print("  database : \(AppPaths.database.path)")
         print("  vectors  : \(AppPaths.vectorIndexes.path)")
         print("  previews : \(AppPaths.previews.path)")
+    }
+
+    private static func describe(_ units: MLComputeUnits) -> String {
+        switch units {
+        case .cpuOnly: "CPU only"
+        case .cpuAndGPU: "CPU and GPU"
+        case .cpuAndNeuralEngine: "CPU and neural engine"
+        case .all: "all available"
+        @unknown default: "unknown"
+        }
     }
 }
 
