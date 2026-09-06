@@ -48,6 +48,11 @@ struct Face: Encodable {
     var x: Double, y: Double, width: Double, height: Double
     var quality: Double?
     var roll: Double?, yaw: Double?, pitch: Double?
+    /// Eye centres in normalised image coordinates, origin upper-left. A face
+    /// model wants the eyes in a fixed place; without these the crop can only be
+    /// approximate.
+    var leftEyeX: Double?, leftEyeY: Double?
+    var rightEyeX: Double?, rightEyeY: Double?
 }
 
 struct Response: Encodable {
@@ -139,8 +144,12 @@ func classify(_ image: CGImage, request spec: Request) async throws -> [Label] {
 }
 
 func detectFaces(_ image: CGImage) async throws -> [Face] {
-    let rectangles = try await DetectFaceRectanglesRequest().perform(on: image)
+    // Landmarks rather than plain rectangles: the box says where the face is and
+    // the eyes say how it is turned, and only the second makes an aligned crop
+    // possible.
+    let rectangles = try await DetectFaceLandmarksRequest().perform(on: image)
     guard !rectangles.isEmpty else { return [] }
+    let size = CGSize(width: image.width, height: image.height)
 
     // Capture quality is what makes face work affordable: most frames of a face
     // are motion-blurred, tiny or turned away, and embedding those is how a
@@ -153,6 +162,12 @@ func detectFaces(_ image: CGImage) async throws -> [Face] {
         }
     }
 
+    func centre(_ points: [CGPoint]) -> CGPoint? {
+        guard !points.isEmpty else { return nil }
+        return CGPoint(x: points.map(\.x).reduce(0, +) / CGFloat(points.count),
+                       y: points.map(\.y).reduce(0, +) / CGFloat(points.count))
+    }
+
     var faces: [Face] = []
     for observation in rectangles {
         let box: CGRect = observation.boundingBox.cgRect
@@ -163,9 +178,22 @@ func detectFaces(_ image: CGImage) async throws -> [Face] {
         let roll = observation.roll.converted(to: .degrees).value
         let yaw = observation.yaw.converted(to: .degrees).value
         let pitch = observation.pitch.converted(to: .degrees).value
+
+        var leftEye: CGPoint?
+        var rightEye: CGPoint?
+        if let landmarks = observation.landmarks {
+            leftEye = centre(landmarks.leftEye.pointsInImageCoordinates(size, origin: .upperLeft))
+            rightEye = centre(landmarks.rightEye.pointsInImageCoordinates(size, origin: .upperLeft))
+        }
+        // Normalised on the way out so the receiving side never has to know how
+        // big the frame was.
         faces.append(Face(x: x, y: y, width: width, height: height,
                           quality: qualities[observation.uuid],
-                          roll: roll, yaw: yaw, pitch: pitch))
+                          roll: roll, yaw: yaw, pitch: pitch,
+                          leftEyeX: leftEye.map { Double($0.x) / Double(image.width) },
+                          leftEyeY: leftEye.map { Double($0.y) / Double(image.height) },
+                          rightEyeX: rightEye.map { Double($0.x) / Double(image.width) },
+                          rightEyeY: rightEye.map { Double($0.y) / Double(image.height) }))
     }
     return faces
 }

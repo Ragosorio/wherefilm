@@ -84,3 +84,38 @@ struct FaceModelTests {
         }
     }
 }
+
+@Suite("Half precision")
+struct HalfPrecisionTests {
+    /// `Float16` is unavailable on x86_64 macOS, so this app converts by hand —
+    /// which means the conversion has to be right rather than assumed.
+    @Test("Round-tripping a float through half precision keeps its value")
+    func roundTrip() {
+        for value in [0.0, 1.0, -1.0, 0.5, -0.5, 0.125, 127.5 / 127.5,
+                      -0.007874, 0.99951, -1024.0, 2048.0] as [Float] {
+            let back = Half.float(from: Half.bits(from: value))
+            let tolerance = max(0.001, abs(value) * 0.001)
+            #expect(abs(back - value) <= tolerance,
+                    "\(value) came back as \(back)")
+        }
+    }
+
+    @Test("The pixel range the model is fed survives the conversion")
+    func pixelRangeSurvives() {
+        // Every value the tensor can hold is (byte − 127.5) / 127.5, so the
+        // whole domain is −1…1 and it is small enough to check exhaustively.
+        for byte in 0...255 {
+            let value = (Float(byte) - 127.5) / 127.5
+            let back = Half.float(from: Half.bits(from: value))
+            #expect(abs(back - value) < 0.002, "byte \(byte): \(value) → \(back)")
+        }
+    }
+
+    @Test("Zero, infinity and sign are not mangled")
+    func edges() {
+        #expect(Half.float(from: Half.bits(from: 0)) == 0)
+        #expect(Half.float(from: Half.bits(from: -0.0)).sign == .minus)
+        #expect(Half.float(from: Half.bits(from: 100_000)).isInfinite)
+        #expect(Half.float(from: Half.bits(from: -100_000)) == -.infinity)
+    }
+}

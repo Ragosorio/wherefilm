@@ -114,8 +114,15 @@ public final class CoreMLFaceEmbedder: FaceEmbedder, @unchecked Sendable {
         var values = [Float](repeating: 0, count: array.count)
         switch array.dataType {
         case .float16:
-            array.withUnsafeBufferPointer(ofType: Float16.self) { buffer in
-                for index in 0..<array.count { values[index] = Float(buffer[index]) }
+            // Raw bytes rather than `Float16`, and that is not fussiness: the
+            // type is *unavailable on x86_64 macOS*, so using it would compile
+            // on this laptop and break the Intel half of a universal build —
+            // which is exactly how this was discovered.
+            array.withUnsafeBytes { raw in
+                let bits = raw.bindMemory(to: UInt16.self)
+                for index in 0..<min(array.count, bits.count) {
+                    values[index] = Half.float(from: bits[index])
+                }
             }
         case .double:
             array.withUnsafeBufferPointer(ofType: Double.self) { buffer in
@@ -158,14 +165,15 @@ public final class CoreMLFaceEmbedder: FaceEmbedder, @unchecked Sendable {
 
         switch dataType {
         case .float16:
-            array.withUnsafeMutableBufferPointer(ofType: Float16.self) { buffer, _ in
+            array.withUnsafeMutableBytes { raw, _ in
+                let bits = raw.bindMemory(to: UInt16.self)
                 for y in 0..<side {
                     for x in 0..<side {
                         let source = (y * side + x) * 4
                         let target = y * side + x
-                        buffer[target] = Float16(scaled(pixels[source]))
-                        buffer[plane + target] = Float16(scaled(pixels[source + 1]))
-                        buffer[2 * plane + target] = Float16(scaled(pixels[source + 2]))
+                        bits[target] = Half.bits(from: scaled(pixels[source]))
+                        bits[plane + target] = Half.bits(from: scaled(pixels[source + 1]))
+                        bits[2 * plane + target] = Half.bits(from: scaled(pixels[source + 2]))
                     }
                 }
             }
@@ -183,6 +191,61 @@ public final class CoreMLFaceEmbedder: FaceEmbedder, @unchecked Sendable {
             }
         }
         return array
+    }
+}
+
+/// IEEE-754 half precision, by hand.
+///
+/// Swift's `Float16` is unavailable on x86_64 macOS, and this app ships one
+/// universal binary for both families. Sixteen lines of bit-twiddling is a small
+/// price for not having a feature that compiles on the developer's laptop and
+/// not on the machine it was written for.
+enum Half {
+    static func bits(from value: Float) -> UInt16 {
+        let pattern = value.bitPattern
+        let sign = UInt16((pattern >> 16) & 0x8000)
+        var exponent = Int32((pattern >> 23) & 0xFF) - 127 + 15
+        var mantissa = pattern & 0x007F_FFFF
+
+        if exponent >= 0x1F { return sign | 0x7C00 }          // overflow → infinity
+        if exponent <= 0 {                                     // subnormal or zero
+            if exponent < -10 { return sign }
+            mantissa |= 0x0080_0000
+            let shift = UInt32(14 - exponent)
+            let rounded = (mantissa + (UInt32(1) << (shift - 1))) >> shift
+            return sign | UInt16(rounded)
+        }
+        // Round to nearest, ties to even.
+        let rounded = mantissa + 0x0000_1000
+        if rounded & 0x0080_0000 != 0 {
+            exponent += 1
+            if exponent >= 0x1F { return sign | 0x7C00 }
+        }
+        return sign | UInt16(exponent << 10) | UInt16((rounded >> 13) & 0x03FF)
+    }
+
+    static func float(from bits: UInt16) -> Float {
+        let sign = UInt32(bits & 0x8000) << 16
+        let exponent = UInt32((bits >> 10) & 0x1F)
+        let mantissa = UInt32(bits & 0x03FF)
+
+        if exponent == 0 {
+            guard mantissa != 0 else { return Float(bitPattern: sign) }
+            // Subnormal: normalise it into a float32 exponent.
+            var shifted = mantissa
+            var adjust: UInt32 = 0
+            while shifted & 0x0400 == 0 {
+                shifted <<= 1
+                adjust += 1
+            }
+            shifted &= 0x03FF
+            let newExponent = 127 - 15 - adjust + 1
+            return Float(bitPattern: sign | (newExponent << 23) | (shifted << 13))
+        }
+        if exponent == 0x1F {
+            return Float(bitPattern: sign | 0x7F80_0000 | (mantissa << 13))
+        }
+        return Float(bitPattern: sign | ((exponent + 127 - 15) << 23) | (mantissa << 13))
     }
 }
 

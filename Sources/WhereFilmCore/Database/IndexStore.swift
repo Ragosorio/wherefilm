@@ -1061,6 +1061,29 @@ public final class IndexStore: Sendable {
         }
     }
 
+
+    /// Queues a visual re-analysis for everything that has no faces yet.
+    ///
+    /// Faces are produced during the visual pass, so turning the feature on for
+    /// a library that is already indexed means running that pass again — which
+    /// also rebuilds moments, embeddings and previews for those assets. That is
+    /// a real cost and the interface says so before it starts; the alternative,
+    /// asking somebody to re-scan thirty terabytes, is worse.
+    @discardableResult
+    public func enqueueFaceAnalysis() throws -> Int {
+        try dbPool.write { db in
+            try db.execute(sql: """
+                INSERT INTO jobs (assetID, task, state, priority, attempts, lastError, updatedAt)
+                SELECT a.assetID, ?, 'pending', ?, 0, NULL, ?
+                FROM assets a
+                WHERE NOT EXISTS (SELECT 1 FROM faces f WHERE f.assetID = a.assetID)
+                ON CONFLICT(assetID, task) DO UPDATE SET
+                    state = 'pending', attempts = 0, lastError = NULL, updatedAt = excluded.updatedAt
+                """, arguments: [JobTask.visual.rawValue, JobTask.visual.defaultPriority, Date()])
+            return db.changesCount
+        }
+    }
+
     private func prepareAnalysisBackfill(key: String, version: String, task: JobTask,
                                          assetPredicate: String) throws -> Int {
         try dbPool.write { db in

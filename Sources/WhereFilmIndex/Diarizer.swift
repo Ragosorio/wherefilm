@@ -1,6 +1,5 @@
 import Foundation
 import AVFoundation
-import FluidAudio
 import WhereFilmCore
 
 /// Who was speaking, and when.
@@ -11,29 +10,30 @@ import WhereFilmCore
 /// "¿dónde sale Jorge?"; this answers "¿dónde habla Jorge?", and linking the two
 /// is what makes the second question work when he is behind the camera.
 ///
-/// ## What this costs, stated plainly
+/// ## Why this talks to another process
 ///
-/// It is the one part of WhereFilm that is not universal and not entirely
-/// offline, and both facts are load-bearing:
+/// Not for crash isolation, the way the Vision helper does — for architecture.
+/// FluidAudio does not compile for x86_64 (`'Float16' is unavailable in macOS`,
+/// inside its own text-to-speech code), and macOS 26 is the last release that
+/// runs on Intel Macs. Linking it into the app would trade a working universal
+/// build for a feature Intel cannot run anyway, since the models are Core ML
+/// built for the neural engine.
 ///
-///  - **Apple silicon only.** FluidAudio's models are Core ML built for the
-///    neural engine. On an Intel Mac this reports itself unavailable and nothing
-///    else changes — the same shape as `SpeechTranscriber` falling back to
-///    `DictationTranscriber`.
-///  - **One download, on purpose.** The pyannote-derived weights are fetched from
-///    Hugging Face the first time, which is a network request in an app whose
-///    whole premise is that there are none. So it never happens implicitly:
-///    `install()` is a command somebody runs, and until they do, diarization
-///    reports unavailable rather than quietly reaching for the network.
+/// So the dependency lives in `wherefilm-speaker-helper`, built for arm64 only.
+/// On an Intel Mac the helper is simply absent and this reports itself
+/// unavailable — the same shape as `SpeechTranscriber` falling back to
+/// `DictationTranscriber`, and the same shape this had before the split.
+///
+/// ## The other cost, stated plainly
+///
+/// The pyannote-derived weights are fetched from Hugging Face the first time,
+/// which is a network request in an app whose whole premise is that there are
+/// none. So it never happens implicitly: `install()` is a command somebody runs,
+/// and until they do, diarization reports unavailable rather than quietly
+/// reaching for the network.
 ///
 /// Licences travel with it: FluidAudio is Apache-2.0, the pyannote weights are
 /// CC-BY-4.0.
-///
-/// One upstream wart worth knowing about: FluidAudio writes `[Profiling]` lines
-/// straight to stderr with no way to turn them off. Harmless in the app, where
-/// stderr goes to Console; noisy in the CLI, where it interleaves with progress.
-/// Suppressing it would mean redirecting the process's stderr around every call,
-/// which would swallow real errors too — a worse trade than some noise.
 public struct Diarizer: Sendable {
     public struct Options: Sendable {
         /// Segments shorter than this are dropped. A speaker label on a
@@ -41,9 +41,7 @@ public struct Diarizer: Sendable {
         public var minimumSegmentSeconds: Double = 1.0
         /// Below this the diarizer is guessing, and a guessed voice print
         /// poisons a cluster far more than a missing one costs.
-        public var minimumQuality: Float = 0.5
-        /// Never fetch models as a side effect of indexing.
-        public var allowModelDownload = false
+        public var minimumQuality: Double = 0.5
 
         public init() {}
     }
@@ -60,17 +58,18 @@ public struct Diarizer: Sendable {
 
     public enum DiarizationError: Error, LocalizedError {
         case unsupportedMachine
-        case modelsNotInstalled
+        case helperMissing
         case noAudioTrack
+        case helperFailed(String)
 
         public var errorDescription: String? {
             switch self {
             case .unsupportedMachine:
                 "Speaker diarization needs Apple silicon; this Mac has no neural engine."
-            case .modelsNotInstalled:
-                "The speaker models are not installed. Run `wherefilm voices install` once."
-            case .noAudioTrack:
-                "The file has no audio track."
+            case .helperMissing:
+                "The speaker helper is not installed in this build."
+            case .noAudioTrack: "The file has no audio track."
+            case .helperFailed(let detail): "Speaker analysis failed: \(detail)"
             }
         }
     }
@@ -85,12 +84,17 @@ public struct Diarizer: Sendable {
         self.options = options
     }
 
-    /// Whether this Mac can do it at all.
-    public static var isSupported: Bool { MachineProfile.current.hasNeuralEngine }
+    /// Whether this Mac can do it at all: a neural engine, and a helper built
+    /// for this architecture.
+    public static var isSupported: Bool {
+        MachineProfile.current.hasNeuralEngine && helperURL() != nil
+    }
 
-    /// Where the downloaded weights live, and whether they are there.
+    /// Where the downloaded weights live. Owned by FluidAudio; this only needs
+    /// to know whether they are there.
     public static var modelsDirectory: URL {
-        OfflineDiarizerModels.defaultModelsDirectory()
+        URL(fileURLWithPath: NSHomeDirectory())
+            .appendingPathComponent("Library/Application Support/FluidAudio/Models")
     }
 
     public static var isInstalled: Bool {
@@ -100,49 +104,128 @@ public struct Diarizer: Sendable {
     }
 
     public static var status: String {
-        guard isSupported else {
+        guard MachineProfile.current.hasNeuralEngine else {
             return "unavailable — needs Apple silicon"
+        }
+        guard helperURL() != nil else {
+            return "unavailable — this build has no speaker helper"
         }
         return isInstalled
             ? "installed (\(modelsDirectory.path))"
             : "not installed — run `wherefilm voices install`"
     }
 
+    static func helperURL() -> URL? {
+        let name = "wherefilm-speaker-helper"
+        var candidates: [URL] = []
+        if let main = Bundle.main.executableURL?.deletingLastPathComponent() {
+            candidates.append(main.appendingPathComponent(name))
+            candidates.append(main.appendingPathComponent("../Helpers/\(name)")
+                .standardizedFileURL)
+        }
+        candidates.append(URL(fileURLWithPath: CommandLine.arguments[0])
+            .deletingLastPathComponent().appendingPathComponent(name))
+        return candidates.first { FileManager.default.isExecutableFile(atPath: $0.path) }
+    }
+
     /// Downloads the models. Deliberately its own verb, run by a person.
     public static func install() async throws {
-        guard isSupported else { throw DiarizationError.unsupportedMachine }
-        let manager = OfflineDiarizerManager(config: .default)
-        try await manager.prepareModels()
+        guard MachineProfile.current.hasNeuralEngine else {
+            throw DiarizationError.unsupportedMachine
+        }
+        _ = try await run(request: ["operation": "install"])
     }
 
     public func diarize(url: URL) async throws -> [Segment] {
         guard Self.isSupported else { throw DiarizationError.unsupportedMachine }
-        guard Self.isInstalled || options.allowModelDownload else {
-            throw DiarizationError.modelsNotInstalled
-        }
         let asset = AVURLAsset(url: url)
         guard try await !asset.loadTracks(withMediaType: .audio).isEmpty else {
             throw DiarizationError.noAudioTrack
         }
+        let reply = try await Self.run(request: [
+            "operation": "diarize",
+            "path": url.path,
+            "minimumSegmentSeconds": options.minimumSegmentSeconds,
+            "minimumQuality": options.minimumQuality,
+        ])
+        return (reply.segments ?? []).map {
+            Segment(startSeconds: $0.startSeconds, endSeconds: $0.endSeconds,
+                    localSpeaker: $0.speaker,
+                    embedding: VectorCodec.normalized($0.embedding),
+                    quality: $0.quality)
+        }
+    }
 
-        let manager = OfflineDiarizerManager(config: .default)
-        try await manager.prepareModels()
-        // The file URL overload streams from disk in chunks. Handing it an array
-        // instead would materialise the whole track — 230 MB an hour at 16 kHz,
-        // which a twelve-hour recording turns into a memory problem the rest of
-        // this pipeline was carefully built to avoid.
-        let result = try await manager.process(url)
+    // MARK: - Talking to the helper
 
-        return result.segments.compactMap { segment in
-            let start = Double(segment.startTimeSeconds)
-            let end = Double(segment.endTimeSeconds)
-            guard end - start >= options.minimumSegmentSeconds,
-                  segment.qualityScore >= options.minimumQuality,
-                  !segment.embedding.isEmpty else { return nil }
-            return Segment(startSeconds: start, endSeconds: end,
-                           localSpeaker: segment.speakerId,
-                           embedding: VectorCodec.normalized(segment.embedding),
-                           quality: Double(segment.qualityScore))
+    struct Reply: Decodable {
+        var ok: Bool
+        var error: String?
+        var segments: [ReplySegment]?
+        var modelsDirectory: String?
+    }
+
+    struct ReplySegment: Decodable {
+        var startSeconds: Double
+        var endSeconds: Double
+        var speaker: String
+        var quality: Double
+        var embedding: [Float]
+    }
+
+    /// One request, one process, then it goes away.
+    ///
+    /// Diarization runs once per file and takes seconds; keeping a helper
+    /// resident between them would hold a Core ML model in memory for nothing.
+    /// The Vision helper is pooled because it runs thousands of times a minute;
+    /// this one does not.
+    static func run(request: [String: Any]) async throws -> Reply {
+        guard let executable = helperURL() else { throw DiarizationError.helperMissing }
+        let payload = try JSONSerialization.data(withJSONObject: request)
+
+        return try await withCheckedThrowingContinuation { continuation in
+            DispatchQueue.global(qos: .utility).async {
+                let process = Process()
+                let toHelper = Pipe(), fromHelper = Pipe()
+                process.executableURL = executable
+                process.standardInput = toHelper
+                process.standardOutput = fromHelper
+                process.standardError = FileHandle.standardError
+                do {
+                    try process.run()
+                    var length = UInt32(payload.count).bigEndian
+                    var framed = Data(bytes: &length, count: 4)
+                    framed.append(payload)
+                    try toHelper.fileHandleForWriting.write(contentsOf: framed)
+
+                    let handle = fromHelper.fileHandleForReading
+                    func read(_ count: Int) throws -> Data {
+                        var data = Data()
+                        while data.count < count {
+                            guard let chunk = try handle.read(upToCount: count - data.count),
+                                  !chunk.isEmpty else {
+                                throw DiarizationError.helperFailed("the helper closed its output")
+                            }
+                            data.append(chunk)
+                        }
+                        return data
+                    }
+                    let header = try read(4)
+                    let size = header.withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
+                    let body = try read(Int(size))
+                    try? toHelper.fileHandleForWriting.close()
+                    process.terminate()
+
+                    let reply = try JSONDecoder().decode(Reply.self, from: body)
+                    if !reply.ok {
+                        throw DiarizationError.helperFailed(reply.error ?? "unknown")
+                    }
+                    continuation.resume(returning: reply)
+                } catch {
+                    if process.isRunning { process.terminate() }
+                    continuation.resume(throwing: error)
+                }
+            }
         }
     }
 }

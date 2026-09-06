@@ -182,10 +182,15 @@ struct Consolidate: AsyncParsableCommand {
 
     @OptionGroup var storeOptions: StoreOptions
 
+    @Option(name: .long, help: "Cosine similarity two groups must reach to be merged.")
+    var threshold: Float?
+
     func run() async throws {
         let store = try storeOptions.makeStore()
         let before = try store.peopleStats()
-        let merged = try await FaceClusterer().consolidate(store: store)
+        var options = FaceClusterer.Options()
+        if let threshold { options.mergeThreshold = threshold }
+        let merged = try await FaceClusterer(options: options).consolidate(store: store)
         let after = try store.peopleStats()
         print("Merged \(merged) groups — \(before.people) → \(after.people) people.")
         print("Named groups and corrected splits were left alone.")

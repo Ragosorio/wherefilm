@@ -10,6 +10,10 @@ struct SearchView: View {
     @Environment(AppModel.self) private var model
     @State private var selected: SearchResult?
     @State private var showingSettings = false
+    @State private var showingPeople = false
+    /// Built lazily and kept: reopening the sheet should not forget what was
+    /// selected or reload every thumbnail.
+    @State private var people: PeopleModel?
     @FocusState private var queryFocused: Bool
 
     var body: some View {
@@ -50,6 +54,21 @@ struct SearchView: View {
             MomentPlayer(result: result) { selected = nil }
                 .preferredColorScheme(.dark)
         }
+        .sheet(isPresented: $showingPeople) {
+            PeopleView(model: peopleModel())
+                .preferredColorScheme(.dark)
+                .foregroundStyle(WhereFilmBrand.silver)
+                .tint(WhereFilmBrand.blue)
+        }
+    }
+
+    private func peopleModel() -> PeopleModel {
+        if let people { return people }
+        let created = PeopleModel(app: model)
+        // Assigning during a view update is what `Task` avoids complaining
+        // about; the sheet reads the returned instance either way.
+        Task { @MainActor in people = created }
+        return created
     }
 
     private var topBar: some View {
@@ -95,6 +114,15 @@ struct SearchView: View {
             }
             .buttonStyle(.bordered)
             .controlSize(.large)
+
+            Button {
+                showingPeople = true
+            } label: {
+                Image(systemName: "person.2")
+                    .frame(width: 22, height: 22)
+            }
+            .buttonStyle(.borderless)
+            .help("Personas: agrupa caras que se repiten y ponles nombre")
 
             Button {
                 showingSettings.toggle()
@@ -424,25 +452,47 @@ private struct ResultCard: View {
             .frame(height: 168)
             .clipped()
 
+            // Every card reserves the same three rows whether or not it has
+            // something to put in them. Without that the grid's rows take the
+            // height of their tallest card and the short ones float in a hole —
+            // which is what a long OCR line next to a bare filename looks like.
             VStack(alignment: .leading, spacing: 8) {
                 Text(result.displayName)
                     .font(.headline)
                     .lineLimit(1)
+                    // Filenames are long in the middle and meaningful at both
+                    // ends: A0045_ENTREVISTA_JUAN…_v3.mov. Trimming the tail
+                    // throws away the extension and the version.
+                    .truncationMode(.middle)
+                    .help(result.displayName)
 
-                if let evidence = result.evidence.first {
-                    Label(evidenceText(evidence), systemImage: icon(for: evidence))
-                        .font(.caption)
-                        .foregroundStyle(WhereFilmBrand.vapor.opacity(0.78))
-                        .lineLimit(2)
+                Group {
+                    if let evidence = result.evidence.first {
+                        Label(evidenceText(evidence), systemImage: icon(for: evidence))
+                            .foregroundStyle(WhereFilmBrand.vapor.opacity(0.78))
+                    } else {
+                        Text(" ")
+                    }
                 }
+                .font(.caption)
+                .lineLimit(2, reservesSpace: true)
+                .truncationMode(.tail)
+                .fixedSize(horizontal: false, vertical: true)
 
-                if let location = result.bestLocation {
-                    Label(locationText(location), systemImage: symbol(for: location.availability))
-                        .font(.caption2)
-                        .foregroundStyle(location.availability == .online ? Color.secondary : Color.orange)
-                        .lineLimit(1)
+                Group {
+                    if let location = result.bestLocation {
+                        Label(locationText(location), systemImage: symbol(for: location.availability))
+                            .foregroundStyle(location.availability == .online
+                                             ? Color.secondary : Color.orange)
+                    } else {
+                        Text(" ")
+                    }
                 }
+                .font(.caption2)
+                .lineLimit(1)
+                .truncationMode(.middle)
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
             .padding(13)
         }
         .whereFilmGlass(cornerRadius: 18)
@@ -464,14 +514,42 @@ private struct ResultCard: View {
     }
 
     private func evidenceText(_ evidence: Evidence) -> String {
+        // No manual truncation. `.prefix` cuts mid-word with no ellipsis and has
+        // no idea how wide the card is; `lineLimit` does, and adds the ellipsis.
         switch evidence {
         case .visual: "La escena coincide con tu descripción"
-        case .transcript(let text, _): "Se escucha: “\(text.prefix(92))”"
-        case .onScreenText(let text): "Aparece escrito: “\(text.prefix(72))”"
+        case .transcript(let text, _): "Se escucha: “\(collapsed(text))”"
+        case .onScreenText(let text): "Aparece escrito: “\(collapsed(text))”"
         case .sceneLabel(let text): "Se reconoce: \(text)"
         case .person(let name, let seconds):
             "Aparece \(name) en \(SearchResult.timecode(seconds))"
-        case .metadata(let text, _): "Coincide con: \(text.prefix(72))"
+        case .metadata(let text, let kind): metadataText(text, kind: kind)
+        }
+    }
+
+    /// OCR arrives with the line breaks of the sign it was read from, and a
+    /// transcript with none. Both look wrong inside a two-line label.
+    private func collapsed(_ text: String) -> String {
+        text.split(whereSeparator: \.isNewline)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+            .joined(separator: " · ")
+    }
+
+    /// A folder match is useful; the twelve directories above it are not.
+    ///
+    /// The metadata channel indexes the containing folder, and on a real machine
+    /// that can be `/private/tmp/claude-501/-Users-…/scratchpad/evallib/ATARDECER`.
+    /// Showing the whole thing tells somebody nothing and eats the card.
+    private func metadataText(_ text: String, kind: SearchTextKind) -> String {
+        switch kind {
+        case .folder:
+            let leaf = text.split(separator: "/").last.map(String.init) ?? text
+            return "En la carpeta \(leaf)"
+        case .filename:
+            return "Coincide el nombre del archivo"
+        default:
+            return "Coincide con: \(collapsed(text))"
         }
     }
 

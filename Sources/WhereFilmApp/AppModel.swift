@@ -83,6 +83,17 @@ final class AppModel {
         }
     }
 
+    /// Face analysis, remembered between launches.
+    ///
+    /// Off until somebody turns it on, and the setting lives here rather than in
+    /// the indexer's options because the decision outlives any one indexer.
+    var analysesFaces = UserDefaults.standard.bool(forKey: "wherefilm.analysesFaces") {
+        didSet {
+            UserDefaults.standard.set(analysesFaces, forKey: "wherefilm.analysesFaces")
+            Task { await indexer?.setDetectFaces(analysesFaces) }
+        }
+    }
+
     private(set) var store: IndexStore?
     private var vectorIndex: VectorIndex?
     private var indexer: Indexer?
@@ -127,6 +138,8 @@ final class AppModel {
 
             var options = Indexer.Options()
             options.variant = variant
+            // Whatever was decided last time. Off unless somebody turned it on.
+            options.detectFaces = analysesFaces
             let environment = ProcessInfo.processInfo.environment
             // A release verification must exercise the complete pipeline even
             // when the MacBook happens to be unplugged. This is private to the
@@ -493,6 +506,20 @@ final class AppModel {
                 addLibrary(vol.mountURL)
             }
         }
+    }
+
+    /// Turns face analysis on and queues the work for a library that is already
+    /// indexed.
+    ///
+    /// Returns how many files were queued, so the interface can say what it just
+    /// started rather than leaving somebody watching a spinner.
+    @discardableResult
+    func enableFaceAnalysis() -> Int {
+        analysesFaces = true
+        guard let store else { return 0 }
+        let queued = (try? store.enqueueFaceAnalysis()) ?? 0
+        Task { await refresh() }
+        return queued
     }
 
     func chooseLibrary() {

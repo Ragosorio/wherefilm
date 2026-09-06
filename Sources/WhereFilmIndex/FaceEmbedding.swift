@@ -92,10 +92,19 @@ public enum FaceEmbeddingError: Error, LocalizedError {
 public enum FaceCrop {
     /// How much context to keep around the detected box.
     ///
-    /// Face models are trained on crops that include forehead, chin and a little
-    /// background; a box tight to the eyes and mouth is a different distribution
-    /// and scores worse against everything.
-    public static let padding = 0.35
+    /// Measured, not guessed. Over 24 photographs of four people from Wikimedia
+    /// Commons — different years, photographers and lighting, which is the hard
+    /// case and the realistic one — the same model separated same-person from
+    /// different-person pairs like this:
+    ///
+    ///     padding 0.00   same p50 0.404   different p50 0.272   F1 0.579
+    ///     padding 0.15   same p50 0.511   different p50 0.326   F1 0.647
+    ///     padding 0.35   same p50 0.492   different p50 0.363   F1 0.512
+    ///
+    /// The first version used 0.35 on the reasoning that face models like some
+    /// context. They do — but not that much, and paying for it in separation was
+    /// invisible until there were real faces to measure.
+    public static let padding = 0.15
     public static let side = 112
 
     /// Whether this detection is worth embedding at all.
@@ -113,6 +122,55 @@ public enum FaceCrop {
         // descriptor to be stable.
         if let yaw = face.yaw, abs(yaw) > 45 { return false }
         return true
+    }
+
+    /// ArcFace's canonical 112×112 template, eyes only.
+    ///
+    /// The full template has five points — eyes, nose, both mouth corners — and
+    /// a similarity transform needs two. Vision gives all of them; these are the
+    /// two that are stable across expression.
+    static let templateLeftEye = CGPoint(x: 38.2946, y: 51.6963)
+    static let templateRightEye = CGPoint(x: 73.5318, y: 51.5014)
+
+    /// Rotates and scales the face so the eyes land where the model was trained
+    /// to find them.
+    ///
+    /// This is what a face model means by "aligned", and skipping it is the
+    /// difference between a descriptor that sometimes merges two people and one
+    /// that does not. Measured on the same 24 photographs:
+    ///
+    ///     plain crop     precision 0.89   recall 0.51   F1 0.647
+    ///     eye-aligned    precision 1.00   recall 0.46   F1 0.632
+    ///
+    /// The F1 is a shade lower and the choice is still obvious. Splitting one
+    /// person across two clusters is a nuisance somebody fixes with one command;
+    /// merging two people is a wrong answer they have to *notice* first, and in
+    /// an archive of thousands of faces they will not.
+    public static func align(_ image: CGImage, leftEye: CGPoint, rightEye: CGPoint) -> CGImage? {
+        let dx = rightEye.x - leftEye.x
+        let dy = rightEye.y - leftEye.y
+        let distance = (dx * dx + dy * dy).squareRoot()
+        guard distance > 1 else { return nil }
+        let scale = (templateRightEye.x - templateLeftEye.x) / distance
+        let angle = atan2(dy, dx)
+
+        guard let context = CGContext(
+            data: nil, width: side, height: side, bitsPerComponent: 8, bytesPerRow: 0,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
+        context.interpolationQuality = .high
+        // The template is written in top-left coordinates and CGContext draws in
+        // bottom-left, so the whole transform is built inside one flip.
+        context.translateBy(x: 0, y: CGFloat(side))
+        context.scaleBy(x: 1, y: -1)
+        context.translateBy(x: templateLeftEye.x, y: templateLeftEye.y)
+        context.rotate(by: -angle)
+        context.scaleBy(x: scale, y: scale)
+        context.translateBy(x: -leftEye.x, y: -leftEye.y)
+        context.translateBy(x: 0, y: CGFloat(image.height))
+        context.scaleBy(x: 1, y: -1)
+        context.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
+        return context.makeImage()
     }
 
     /// Cuts out the face, padded and upright, at the size a model expects.

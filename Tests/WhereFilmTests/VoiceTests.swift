@@ -154,14 +154,21 @@ struct VoiceTests {
         #expect(try !store.textSearch(pattern: "\"presupuesto\"*", kinds: [.transcript]).isEmpty)
     }
 
-    @Test("A Mac without a neural engine says so instead of failing obscurely")
+    @Test("An absent capability explains itself instead of failing obscurely")
     func unsupportedMachineIsExplicit() {
-        // On Intel this whole feature is absent, and the product's shape is that
-        // an absent capability is reported, never faked.
+        // There are two ways this can be unavailable and they are different
+        // facts: a Mac with no neural engine can never run it, and a build with
+        // no speaker helper — a test bundle, or an Intel slice, where the helper
+        // is deliberately not built — has not shipped it. The product's shape is
+        // that an absent capability is reported, never faked, and reported
+        // *accurately*.
         let status = Diarizer.status
         #expect(!status.isEmpty)
         if !Diarizer.isSupported {
-            #expect(status.contains("Apple silicon"))
+            #expect(status.contains("unavailable"))
+            #expect(status.contains("Apple silicon") || status.contains("speaker helper"))
+        } else {
+            #expect(status.contains("installed"))
         }
     }
 }

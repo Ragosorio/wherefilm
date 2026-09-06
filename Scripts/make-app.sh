@@ -44,6 +44,7 @@ done
 
 BUILT_BINARIES=()
 BUILT_HELPERS=()
+SPEAKER_HELPER=""
 for architecture in $ARCHITECTURES; do
   case "$architecture" in
     arm64|x86_64) ;;
@@ -80,6 +81,24 @@ for architecture in $ARCHITECTURES; do
     exit 1
   }
   BUILT_HELPERS+=("$helper")
+
+  # The speaker helper is arm64 only, and that is a fact about the dependency
+  # rather than a decision: FluidAudio does not compile for x86_64, and its
+  # models need a neural engine no Intel Mac has. Building it for arm64 and
+  # skipping it elsewhere keeps one universal app that simply reports the
+  # capability absent on hardware that could never have run it.
+  if [[ "$architecture" == "arm64" ]]; then
+    swift build -c "$CONFIG" \
+      --triple "$triple" \
+      --scratch-path "$scratch" \
+      --product wherefilm-speaker-helper
+    speaker="$scratch/$architecture-apple-macosx/$CONFIG/wherefilm-speaker-helper"
+    [[ -f "$speaker" ]] || {
+      echo "Build produced no arm64 speaker helper at $speaker" >&2
+      exit 1
+    }
+    SPEAKER_HELPER="$speaker"
+  fi
 done
 
 rm -rf "$APP"
@@ -97,6 +116,11 @@ else
   lipo -create "${BUILT_HELPERS[@]}" -output "$APP/Contents/Helpers/wherefilm-vision-helper"
 fi
 chmod +x "$APP/Contents/Helpers/wherefilm-vision-helper"
+
+if [[ -n "$SPEAKER_HELPER" ]]; then
+  cp "$SPEAKER_HELPER" "$APP/Contents/Helpers/wherefilm-speaker-helper"
+  chmod +x "$APP/Contents/Helpers/wherefilm-speaker-helper"
+fi
 
 for architecture in $ARCHITECTURES; do
   lipo "$APP/Contents/MacOS/WhereFilm" -verify_arch "$architecture"

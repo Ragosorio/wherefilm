@@ -58,6 +58,8 @@ public actor VisionHelperPool {
         public var x: Double, y: Double, width: Double, height: Double
         public var quality: Double?
         public var roll: Double?, yaw: Double?, pitch: Double?
+        public var leftEyeX: Double?, leftEyeY: Double?
+        public var rightEyeX: Double?, rightEyeY: Double?
     }
 
     public struct Response: Decodable, Sendable {

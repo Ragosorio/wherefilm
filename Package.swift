@@ -11,6 +11,7 @@ let package = Package(
         .library(name: "WhereFilmSearch", targets: ["WhereFilmSearch"]),
         .executable(name: "wherefilm", targets: ["WhereFilmCLI"]),
         .executable(name: "wherefilm-vision-helper", targets: ["WhereFilmVisionHelper"]),
+        .executable(name: "wherefilm-speaker-helper", targets: ["WhereFilmSpeakerHelper"]),
         .executable(name: "WhereFilmApp", targets: ["WhereFilmApp"]),
     ],
     dependencies: [
@@ -36,10 +37,18 @@ let package = Package(
         ),
         .target(
             name: "WhereFilmIndex",
-            dependencies: [
-                "WhereFilmCore", "WhereFilmML",
-                .product(name: "FluidAudio", package: "FluidAudio"),
-            ]
+            dependencies: ["WhereFilmCore", "WhereFilmML"]
+        ),
+        // Speaker diarization lives in its own executable, and the reason is
+        // architectural rather than defensive: FluidAudio does not compile for
+        // x86_64 — `'Float16' is unavailable in macOS` inside its own TTS code —
+        // and macOS 26 is the last release that runs on Intel Macs. Linking it
+        // into the app would trade a working universal build for a feature Intel
+        // cannot run anyway. Built for arm64 only; absent, and reported absent,
+        // everywhere else.
+        .executableTarget(
+            name: "WhereFilmSpeakerHelper",
+            dependencies: [.product(name: "FluidAudio", package: "FluidAudio")]
         ),
         .target(
             name: "WhereFilmSearch",

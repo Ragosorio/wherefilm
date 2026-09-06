@@ -44,13 +44,21 @@ public struct DetectedFace: Sendable {
     public let x: Double, y: Double, width: Double, height: Double
     public let quality: Double?
     public let roll: Double?, yaw: Double?, pitch: Double?
+    /// Eye centres, normalised, origin **upper-left** — the coordinate space a
+    /// crop is drawn in. The box and the eyes genuinely use different origins
+    /// here, which is worth stating rather than discovering.
+    public let leftEye: CGPoint?
+    public let rightEye: CGPoint?
 
     public init(x: Double, y: Double, width: Double, height: Double,
                 quality: Double? = nil, roll: Double? = nil,
-                yaw: Double? = nil, pitch: Double? = nil) {
+                yaw: Double? = nil, pitch: Double? = nil,
+                leftEye: CGPoint? = nil, rightEye: CGPoint? = nil) {
         self.x = x; self.y = y; self.width = width; self.height = height
         self.quality = quality
         self.roll = roll; self.yaw = yaw; self.pitch = pitch
+        self.leftEye = leftEye
+        self.rightEye = rightEye
     }
 }
 
@@ -163,9 +171,14 @@ public struct FrameAnalyzer: Sendable {
             labels: (response.labels ?? []).map {
                 SceneLabel(identifier: $0.identifier, confidence: $0.confidence)
             },
-            faces: (response.faces ?? []).map {
-                DetectedFace(x: $0.x, y: $0.y, width: $0.width, height: $0.height,
-                             quality: $0.quality, roll: $0.roll, yaw: $0.yaw, pitch: $0.pitch)
+            faces: (response.faces ?? []).map { face in
+                DetectedFace(
+                    x: face.x, y: face.y, width: face.width, height: face.height,
+                    quality: face.quality, roll: face.roll, yaw: face.yaw, pitch: face.pitch,
+                    leftEye: face.leftEyeX.flatMap { x in
+                        face.leftEyeY.map { CGPoint(x: x, y: $0) } },
+                    rightEye: face.rightEyeX.flatMap { x in
+                        face.rightEyeY.map { CGPoint(x: x, y: $0) } })
             })
     }
 
@@ -228,8 +241,14 @@ public struct FrameAnalyzer: Sendable {
 
     static func detectFacesInProcess(_ image: CGImage) async -> [DetectedFace] {
         guard let observations = try? await VisionGate.shared.run({
-            try await DetectFaceRectanglesRequest().perform(on: image)
+            try await DetectFaceLandmarksRequest().perform(on: image)
         }) else { return [] }
+        let size = CGSize(width: image.width, height: image.height)
+        func centre(_ points: [CGPoint]) -> CGPoint? {
+            guard !points.isEmpty else { return nil }
+            return CGPoint(x: points.map(\.x).reduce(0, +) / CGFloat(points.count) / size.width,
+                           y: points.map(\.y).reduce(0, +) / CGFloat(points.count) / size.height)
+        }
         var qualities: [UUID: Double] = [:]
         if let scored = try? await VisionGate.shared.run({
             try await DetectFaceCaptureQualityRequest().perform(on: image)
@@ -247,7 +266,11 @@ public struct FrameAnalyzer: Sendable {
                 quality: qualities[observation.uuid],
                 roll: observation.roll.converted(to: .degrees).value,
                 yaw: observation.yaw.converted(to: .degrees).value,
-                pitch: observation.pitch.converted(to: .degrees).value)
+                pitch: observation.pitch.converted(to: .degrees).value,
+                leftEye: observation.landmarks.flatMap {
+                    centre($0.leftEye.pointsInImageCoordinates(size, origin: .upperLeft)) },
+                rightEye: observation.landmarks.flatMap {
+                    centre($0.rightEye.pointsInImageCoordinates(size, origin: .upperLeft)) })
         }
     }
 }

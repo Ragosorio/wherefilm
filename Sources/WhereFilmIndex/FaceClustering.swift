@@ -20,15 +20,36 @@ public actor FaceClusterer {
     public struct Options: Sendable {
         /// Cosine similarity at which a face joins an existing cluster.
         ///
-        /// Deliberately not a constant this file believes in. The right value
-        /// depends entirely on which model produced the vectors, and the
-        /// descriptor shipped today is not a face model at all — so this is a
-        /// starting point to be measured per model, exactly like
-        /// `MobileCLIPVariant.similarityFloor`.
-        public var joinThreshold: Float = 0.62
-        /// The tighter bar for merging two whole clusters, which affects many
-        /// faces at once and so has to be more certain than a single join.
-        public var mergeThreshold: Float = 0.72
+        /// Measured for AuraFace over 24 photographs of four public figures
+        /// across many years and photographers — the hard case, and the one an
+        /// archive actually contains. With eye-aligned crops:
+        ///
+        ///     same person       p50 0.397
+        ///     different people  p50 0.254   p95 0.423
+        ///
+        /// 0.45 sits above the 95th percentile of *different* people, which is
+        /// the number that matters. It splits one person across a few clusters,
+        /// and it does not put two people in one.
+        ///
+        /// The right value depends entirely on which model produced the vectors,
+        /// so this is a measurement and not a belief — `Scripts/fetch-face-fixture.sh`
+        /// builds the fixture that produced it.
+        public var joinThreshold: Float = 0.45
+        /// The bar for merging two whole clusters, which affects many faces at
+        /// once and so has to be at least as certain as a single join.
+        ///
+        /// Measured on the same fixture, consolidating 17 clusters over 26 faces
+        /// of four people:
+        ///
+        ///     0.55   merged 0    17 clusters   purity 96%
+        ///     0.50   merged 1    16 clusters   purity 96%
+        ///     0.40   merged 8     9 clusters   purity 69%   ← one cluster ate two people
+        ///
+        /// The cliff between 0.45 and 0.40 is the whole argument for the bias
+        /// this file is written around. Fewer clusters look tidier right up to
+        /// the moment two people become one, and that is the error nobody
+        /// notices in an archive of thousands of faces.
+        public var mergeThreshold: Float = 0.50
         /// A cluster this small is probably a bad crop rather than a person.
         public var minimumClusterSize = 2
 

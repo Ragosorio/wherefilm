@@ -113,6 +113,18 @@ public actor Indexer {
         governor.settings = settings
     }
 
+    /// Turns face analysis on or off while the indexer is running.
+    ///
+    /// It is opt-in, so the answer changes at the moment somebody decides — not
+    /// at launch, which is when the options were fixed.
+    public func setDetectFaces(_ enabled: Bool) {
+        options.detectFaces = enabled
+    }
+
+    public func setDiarizeSpeakers(_ enabled: Bool) {
+        options.diarizeSpeakers = enabled
+    }
+
     /// Interactive reads always outrank background enrichment. In-flight work
     /// is allowed to finish safely; no new wave starts until every overlapping
     /// search has ended.
@@ -454,8 +466,23 @@ public actor Indexer {
     ) async -> [FaceRow] {
         var rows: [FaceRow] = []
         for face in faces {
-            guard FaceCrop.isWorthEmbedding(face, frameWidth: image.width),
-                  let crop = FaceCrop.cut(face, from: image),
+            guard FaceCrop.isWorthEmbedding(face, frameWidth: image.width) else { continue }
+            // Aligned when the eyes were found, cropped when they were not. The
+            // aligned path is the one that does not merge two people; the crop
+            // is a usable second best rather than a failure.
+            let prepared: CGImage?
+            if let left = face.leftEye, let right = face.rightEye {
+                prepared = FaceCrop.align(
+                    image,
+                    leftEye: CGPoint(x: left.x * Double(image.width),
+                                     y: left.y * Double(image.height)),
+                    rightEye: CGPoint(x: right.x * Double(image.width),
+                                      y: right.y * Double(image.height)))
+                    ?? FaceCrop.cut(face, from: image)
+            } else {
+                prepared = FaceCrop.cut(face, from: image)
+            }
+            guard let crop = prepared,
                   let vector = try? await embedder.embed(crop) else { continue }
             let encoded = VectorCodec.encodeInt8(vector)
             rows.append(FaceRow(
