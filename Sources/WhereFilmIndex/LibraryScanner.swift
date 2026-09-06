@@ -32,6 +32,9 @@ public struct LibraryScanner: Sendable {
         public var minimumVideoSize: Int64 = 64 * 1024
         public var minimumImageSize: Int64 = 2 * 1024
         public var enqueueTranscription = true
+        /// Queue speaker analysis alongside transcription. Off by default: it is
+        /// opt-in, Apple silicon only, and its models are a separate download.
+        public var enqueueDiarization = false
 
         public init() {}
     }
@@ -265,6 +268,9 @@ public struct LibraryScanner: Sendable {
             modifiedAt: modifiedAt, availability: .online))
 
         var tasks: [JobTask] = [.metadata, .visual]
+        if options.enqueueDiarization && info.hasAudio && info.mediaType != .image {
+            tasks.append(.diarize)
+        }
         if options.enqueueTranscription && info.hasAudio && info.mediaType != .image {
             tasks.append(.transcribe)
         }

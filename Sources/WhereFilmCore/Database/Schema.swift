@@ -375,6 +375,56 @@ public enum Schema {
                 """)
         }
 
+        // Voices: who spoke, and when.
+        //
+        // The mirror of faces, and the half that answers a different question.
+        // A person who is talking is very often not on screen — an interviewer,
+        // a narrator, somebody behind the camera — so "¿dónde habla Jorge?" and
+        // "¿dónde sale Jorge?" have different answers, and the transcript alone
+        // knows neither.
+        //
+        // Same rules as faces, for the same reason: a voice print is biometric,
+        // every vector records its model, and `forgetEveryone()` takes these
+        // tables with it.
+        migrator.registerMigration("v9-voices") { db in
+            try db.create(table: "voices") { t in
+                t.autoIncrementedPrimaryKey("voiceID")
+                // Filled in when a voice cluster is linked to a face cluster, or
+                // named directly. NULL means "somebody, consistently".
+                t.column("personID", .integer)
+                    .references("people", onDelete: .setNull)
+                t.column("centroid", .blob)
+                t.column("segmentCount", .integer).notNull().defaults(to: 0)
+                t.column("modelID", .text).notNull()
+                t.column("createdAt", .datetime).notNull()
+                t.column("updatedAt", .datetime).notNull()
+            }
+
+            try db.create(table: "voice_segments") { t in
+                t.autoIncrementedPrimaryKey("segmentID")
+                t.column("assetID", .integer).notNull()
+                    .references("assets", onDelete: .cascade)
+                t.column("startSeconds", .double).notNull()
+                t.column("endSeconds", .double).notNull()
+                // The speaker label the diarizer used *within this file*. It
+                // means nothing across files, which is exactly why clustering
+                // over the embeddings exists.
+                t.column("localSpeaker", .text).notNull()
+                t.column("voiceID", .integer)
+                    .references("voices", onDelete: .setNull)
+                t.column("modelID", .text).notNull()
+                t.column("dimensions", .integer).notNull().defaults(to: 0)
+                t.column("quantization", .text).notNull().defaults(to: "int8")
+                t.column("scale", .double).notNull().defaults(to: 1.0)
+                t.column("vector", .blob)
+                t.column("confidence", .double)
+            }
+            try db.create(index: "idx_voice_segments_asset", on: "voice_segments",
+                          columns: ["assetID", "startSeconds"])
+            try db.create(index: "idx_voice_segments_voice", on: "voice_segments",
+                          columns: ["voiceID"])
+        }
+
         return migrator
     }
 }

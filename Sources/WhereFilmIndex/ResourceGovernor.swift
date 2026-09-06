@@ -263,8 +263,12 @@ public struct ResourceGovernor: Sendable {
                                     reason: .onBattery)
         }
 
+        // Everything, on a machine with nothing else to do. Diarization sits
+        // beside transcription rather than with the cheap work: both stream a
+        // whole audio track through a model, and neither should start while
+        // somebody is editing or on battery.
         return GovernorDecision(
-            allowedTasks: [.metadata, .visual, .ocr, .transcribe, .strongHash],
+            allowedTasks: [.metadata, .visual, .ocr, .transcribe, .diarize, .strongHash],
             concurrency: max(1, settings.maxConcurrency),
             scanConcurrency: scanWidth,
             reason: .none)

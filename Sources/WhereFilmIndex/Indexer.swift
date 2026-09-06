@@ -39,6 +39,9 @@ public actor Indexer {
         /// not in the room — an archive is full of them — so this is the one
         /// analysis in the pipeline that is a decision rather than a default.
         public var detectFaces = false
+        /// Work out who was speaking. Off by default, Apple silicon only, and
+        /// needs a one-time model download somebody asks for.
+        public var diarizeSpeakers = false
         /// Languages the text recogniser should expect, and vocabulary it should
         /// prefer. Both nil/empty by default: an archive's own names are the
         /// caller's to supply.
@@ -71,8 +74,9 @@ public actor Indexer {
 
     /// Which descriptor turns a face into a vector. Behind a protocol because
     /// Vision has no face-identity model and the real one has to be installed.
-    let faceEmbedder: any FaceEmbedder = VisionFeaturePrintEmbedder()
+    let faceEmbedder: any FaceEmbedder = FaceEmbedderFactory.best()
     let faceClusterer = FaceClusterer()
+    let voiceClusterer = VoiceClusterer()
 
     private var imageEncoder: MobileCLIPImageEncoder?
     /// Which compute units the resident encoder was built for, so a change in
@@ -271,6 +275,7 @@ public actor Indexer {
         case .visual: try await processVisual(asset: asset, options: options)
         case .ocr: try await processOCRBackfill(asset: asset, options: options)
         case .transcribe: try await processTranscription(asset: asset, options: options)
+        case .diarize: try await processDiarization(asset: asset, options: options)
         case .strongHash: try processStrongHash(asset: asset)
         }
     }
@@ -292,6 +297,10 @@ public actor Indexer {
         case .transcribe:
             // No frames, but bounded PCM streaming through SpeechAnalyzer still
             // deserves to be counted so audio and video share one ceiling.
+            4
+        case .diarize:
+            // Streams from disk in chunks like transcription, and holds model
+            // buffers of its own while it does.
             4
         }
     }
@@ -689,6 +698,56 @@ public actor Indexer {
         try store.addLevels(.spoken, to: assetID)
         let suffix = engine.map { $0.name == "SpeechTranscriber" ? "" : " (\($0.name))" } ?? ""
         return "\(segments.count) transcript chunks\(suffix)"
+    }
+
+    /// Who spoke, and where that puts them.
+    ///
+    /// Runs only when asked for. Diarization is the one analysis whose models are
+    /// not already on the machine, so an indexer that reached for the network on
+    /// its own would break a promise the rest of the product keeps.
+    nonisolated private func processDiarization(asset: Asset, options: Options) async throws -> String {
+        guard options.diarizeSpeakers else { throw IndexerSkip(reason: "speaker analysis is off") }
+        guard Diarizer.isSupported else {
+            throw IndexerSkip(reason: "speaker analysis needs Apple silicon")
+        }
+        guard Diarizer.isInstalled else {
+            throw IndexerSkip(reason: "speaker models are not installed — run `wherefilm voices install`")
+        }
+        guard let assetID = asset.assetID else { throw IndexerSkip(reason: "no id") }
+        let url = try onlineURL(for: assetID)
+
+        let segments = try await Diarizer().diarize(url: url)
+        guard !segments.isEmpty else { throw IndexerSkip(reason: "no speech found") }
+
+        let stored = try store.replaceVoiceSegments(assetID: assetID, segments.map { segment in
+            let encoded = VectorCodec.encodeInt8(segment.embedding)
+            return VoiceSegment(
+                assetID: assetID, startSeconds: segment.startSeconds,
+                endSeconds: segment.endSeconds, localSpeaker: segment.localSpeaker,
+                modelID: Diarizer.modelID, dimensions: segment.embedding.count,
+                scale: encoded.scale, vector: encoded.data, confidence: segment.quality)
+        })
+        try await voiceClusterer.assign(segments: stored, store: store)
+
+        // Appearances by voice sit in the same table as appearances by face, so
+        // "where does this person appear" and "where do they speak" are one
+        // query. Only voices already linked to a person contribute; an unlinked
+        // voice is a speaker nobody has identified yet.
+        let linked = try store.voices().reduce(into: [Int64: Int64]()) { map, voice in
+            if let voiceID = voice.voiceID, let personID = voice.personID {
+                map[voiceID] = personID
+            }
+        }
+        if !linked.isEmpty {
+            let refreshed = try store.voiceSegments(assetID: assetID)
+            let spoken = SpokenAppearanceBuilder.intervals(
+                from: refreshed, assetID: assetID, personOf: linked)
+            let faces = try store.appearances(assetID: assetID).filter { $0.source != "voice" }
+            try store.replaceAppearances(assetID: assetID, faces + spoken)
+        }
+
+        let speakers = Set(stored.map(\.localSpeaker)).count
+        return "\(stored.count) speech segments · \(speakers) speakers"
     }
 
     // MARK: - Idle work

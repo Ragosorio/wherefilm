@@ -1,9 +1,8 @@
 # Precision pass — 2026-09-05
 
 What was built against [`PLAN-02`](PLAN-02-PRECISION-PERSONAS-INTEL.md), what it
-measured, and what it failed to prove. Eight of the nine phases landed; the
-numbers below are the ones that survived being measured properly, which is not
-all of the ones that were hoped for.
+measured, and what it failed to prove. All nine phases landed; the numbers below are the ones that survived being
+measured properly, which is not all of the ones that were hoped for.
 
 ## How anything here is measured
 
@@ -133,22 +132,50 @@ split, appearances as intervals, and erasure. See
 [ADR 7](decisions/0007-faces-reversed.md) for why the original exclusion was
 reversed and what makes that acceptable.
 
-**Unverified, and it cannot be verified here.** Vision exposes no identity
-embedding, so this ships with Vision's general feature print, which is not a
-face recognition model. The evaluation library confirms exactly one thing about
-faces: none are found in 43 photographs of landscapes and text, which is
-correct. Synthetic faces are not detected at all (0/3 on carefully drawn ones),
-so recognition quality is unmeasured until it runs on real footage of real
-people.
+**A real model, and still unverified end to end.** Vision exposes no identity
+embedding, so the descriptor comes from outside: `Scripts/fetch-face-model.sh`
+installs AuraFace, a ResNet-100 ArcFace model published under **Apache-2.0** —
+chosen over the better-known InsightFace and EdgeFace weights precisely because
+those are research-only, and this app already carries one research-licensed
+model in MobileCLIP. Without it the pipeline falls back to Vision's general
+feature print, which is not face recognition and says so in `doctor`.
 
-### 14 · Voices — **not built**
+Verified about the model: correct tensor layout (1×3×112×112, channels first,
+−1…1, half precision — which is how a fatal `Float16` mismatch was caught), 512
+unit-length dimensions, deterministic for identical pixels, discriminating
+between different ones.
 
-Speaker diarization needs FluidAudio: a new external dependency, whose SDK is
-Apache-2.0 but whose model is CC-BY-4.0, and which is published for Apple
-silicon only. That last point argues directly against the first objective of
-this plan, and adding a dependency to somebody else's project is their decision
-rather than an implementation detail. The tables and the cluster-linking design
-are described in `PLAN-02` §4.6 and nothing built here forecloses them.
+Unverified: accuracy on actual people. 43 photographs of landscapes and text
+contain no faces — the correct answer, and confirmed — and synthetic faces are
+not detected at all (0/3 on carefully drawn ones). That measurement needs real
+footage.
+
+### 14 · Voices
+
+Built after the objection below was raised and overruled, which is the right
+order: the concern was real and the decision was the user's.
+
+FluidAudio is a new external dependency (Apache-2.0 SDK, CC-BY-4.0 pyannote
+weights), it is published for Apple silicon only, and its models are fetched
+from Hugging Face — a network request in an app whose premise is that there are
+none. All three costs are handled by making them explicit rather than hiding
+them: `wherefilm voices install` is a command a person runs, indexing never
+reaches for the network on its own, and on a Mac without a neural engine the
+capability reports itself absent and nothing else changes.
+
+It compiles and links for x86_64, so the universal build is intact.
+
+Verified end to end on the two narrated videos: each produced one speech
+segment and one speaker, correctly, and the two segments — the same synthetic
+voice in two different files — **clustered into a single voice**. That is the
+part that matters: a diarizer's "Speaker 1" means nothing across files, and
+clustering the embeddings is what turns forty unrelated speakers into one
+person.
+
+Voice appearances land in the same `person_appearances` table faces write to,
+so "¿dónde sale Jorge?" and "¿dónde habla Jorge?" are one query. Linking a
+voice to a face is *proposed* from how much time they share on screen and
+confirmed by a person, like every other identity decision here.
 
 ### 15 · Learning, and getting out of the way
 
@@ -182,6 +209,9 @@ nDCG@10 0.853**, unchanged from before the phase.
 | Can answer "¿dónde sale Jorge?" | no | yes, unverified |
 | Can move an indexed drive to another Mac | no | yes, verified |
 | Runs on Intel | untested | verified through Rosetta |
+| Nonsense queries that answer anyway | 38% | 12% |
+| Face recognition model | none | AuraFace, Apache-2.0 |
+| Can answer "¿dónde habla Jorge?" | no | yes, verified on narration |
 
 The recall number barely moved, and that is the honest headline. What moved was
 everything around it: false positives on the path most Macs will take, a
@@ -194,9 +224,15 @@ capabilities — people, portability, Intel — that did not exist.
 1. **Measure on Manu's real material.** Every "neutral" verdict above is
    neutral *on 43 landscape photographs*. Labels, reranking and faces are all
    waiting on an archive with people and things in it.
-2. **Install a real face model.** One `FaceEmbedder`, one `modelID`, a
-   background reindex. Nothing else changes.
-3. **Re-measure the S2 rerank with S2's own calibration**, which is the single
-   most likely reason it is currently worthless.
-4. **Decide about FluidAudio** — it is the only phase left undone, and the
-   decision is about a dependency, not about code.
+2. **Run face recognition on real footage.** The model is installed and the
+   plumbing is proven; what nobody has measured is whether it groups Manu's
+   people correctly, which is the only question that matters.
+3. ~~Re-measure the S2 rerank with S2's own calibration.~~ Done, and the answer
+   was no: `wherefilm calibrate` shows S0 and S2 separating right from wrong
+   answers almost identically (medians 0.191/0.133 against 0.177/0.122), so the
+   second opinion has little to add. The same measurement did find the visual
+   floor was too low, and raising it from 0.14 to 0.18 halved the false
+   positives.
+4. **Try speaker analysis on a real interview.** It is verified on synthetic
+   narration, where one voice is genuinely one voice. Two people talking over
+   each other is the case that decides whether the thresholds are right.

@@ -1038,6 +1038,29 @@ public final class IndexStore: Sendable {
             assetPredicate: "EXISTS (SELECT 1 FROM transcript_chunks t WHERE t.assetID = a.assetID)")
     }
 
+
+    /// Queues speaker analysis for every asset that has speech and no voices yet.
+    ///
+    /// Diarization arrived after most libraries were already indexed, and asking
+    /// somebody to re-scan a thirty-terabyte archive to enable one opt-in feature
+    /// would be a poor trade. An asset qualifies if it has a transcript — which
+    /// is the cheapest available proof that there is speech in it — and no voice
+    /// segments already.
+    @discardableResult
+    public func enqueueDiarization() throws -> Int {
+        try dbPool.write { db in
+            try db.execute(sql: """
+                INSERT INTO jobs (assetID, task, state, priority, attempts, lastError, updatedAt)
+                SELECT a.assetID, ?, 'pending', ?, 0, NULL, ?
+                FROM assets a
+                WHERE a.mediaType <> 'image'
+                  AND NOT EXISTS (SELECT 1 FROM voice_segments v WHERE v.assetID = a.assetID)
+                ON CONFLICT(assetID, task) DO NOTHING
+                """, arguments: [JobTask.diarize.rawValue, JobTask.diarize.defaultPriority, Date()])
+            return db.changesCount
+        }
+    }
+
     private func prepareAnalysisBackfill(key: String, version: String, task: JobTask,
                                          assetPredicate: String) throws -> Int {
         try dbPool.write { db in

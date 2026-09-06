@@ -23,7 +23,7 @@ struct WhereFilm: AsyncParsableCommand {
         version: "0.1.0",
         subcommands: [Scan.self, Index.self, Search.self, Status.self,
                       Volumes.self, Doctor.self, Rebuild.self, Tokenize.self,
-                      Eval.self, Calibrate.self, People.self, Usage.self, Sidecar.self, BenchmarkFixture.self],
+                      Eval.self, Calibrate.self, People.self, Voices.self, Usage.self, Sidecar.self, BenchmarkFixture.self],
         defaultSubcommand: Status.self)
 }
 
@@ -134,6 +134,9 @@ struct Index: AsyncParsableCommand {
     @Flag(name: .long, help: "Find and group faces. Off by default — this is biometric data.")
     var faces = false
 
+    @Flag(name: .long, help: "Work out who was speaking. Apple silicon, and `voices install` first.")
+    var voices = false
+
     @Option(name: .long, help: "How many jobs to run at once. Defaults to what the governor allows.")
     var concurrency: Int?
 
@@ -155,12 +158,14 @@ struct Index: AsyncParsableCommand {
         try await Self.runIndexing(store: store, limit: limit, tasks: selected,
                                    variant: variant, fullSpeed: fullSpeed, quiet: false,
                                    recognizeText: !noOcr, detectFaces: faces,
+                                   diarizeSpeakers: voices,
                                    concurrency: concurrency, window: schedule)
     }
 
     static func runIndexing(store: IndexStore, limit: Int, tasks: [JobTask],
                             variant: MobileCLIPVariant, fullSpeed: Bool, quiet: Bool,
                             recognizeText: Bool = true, detectFaces: Bool = false,
+                            diarizeSpeakers: Bool = false,
                             concurrency: Int? = nil, window: IndexingWindow? = nil) async throws {
         let vectorIndex = try makeVectorIndex(variant: variant, store: store)
 
@@ -168,6 +173,14 @@ struct Index: AsyncParsableCommand {
         indexerOptions.variant = variant
         indexerOptions.recognizeText = recognizeText
         indexerOptions.detectFaces = detectFaces
+        indexerOptions.diarizeSpeakers = diarizeSpeakers
+        if diarizeSpeakers {
+            // Diarization arrived after most libraries were indexed. Asking for
+            // a re-scan of a thirty-terabyte archive to turn on one opt-in
+            // feature would be a poor trade.
+            let queued = try store.enqueueDiarization()
+            if queued > 0 && !quiet { print("Queued speaker analysis for \(queued) files.\n") }
+        }
 
         var governorSettings = ResourceGovernor.Settings()
         governorSettings.mode = fullSpeed ? .fullSpeed : .smart
@@ -547,14 +560,20 @@ struct Doctor: AsyncParsableCommand {
             }
         }
 
+        // Diarization is the one capability whose absence is a property of the
+        // machine rather than of the library, so it reports either way.
+        print("\nFaces (opt-in)")
+        print("  \(FaceEmbedderFactory.status)")
+
+        print("\nSpeakers (opt-in)")
+        print("  \(Diarizer.status)")
+
         // Only shown when there is something to show. A search tool that lists
         // "0 faces" on every run is advertising a feature nobody asked for.
         if let people = try? IndexStore(url: AppPaths.database).peopleStats(), people.faces > 0 {
             print("\nPeople  (opt-in — `wherefilm index --faces`)")
             print("  \(people.faces) faces · \(people.people) groups · \(people.named) named")
-            print("  descriptor: \(VisionFeaturePrintEmbedder().modelID)")
-            print("  ⚠ that descriptor is Vision's general image feature print, not a face")
-            print("    recognition model — see docs/decisions/0007-faces-reversed.md")
+            print("  descriptor: \(FaceEmbedderFactory.status)")
             print("  delete all of it: wherefilm people forget --yes")
         }
 

@@ -74,11 +74,16 @@ public struct VisionFeaturePrintEmbedder: FaceEmbedder {
 public enum FaceEmbeddingError: Error, LocalizedError {
     case emptyDescriptor
     case cropFailed
+    case modelNotInstalled(URL)
+    case unexpectedModel(String)
 
     public var errorDescription: String? {
         switch self {
         case .emptyDescriptor: "The face descriptor came back empty."
         case .cropFailed: "The face could not be cut out of the frame."
+        case .modelNotInstalled(let directory):
+            "No face model in \(directory.path). Run Scripts/fetch-face-model.sh."
+        case .unexpectedModel(let detail): "Unexpected face model: \(detail)"
         }
     }
 }

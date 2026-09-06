@@ -274,6 +274,9 @@ public enum JobTask: String, Codable, Sendable, DatabaseValueConvertible, CaseIt
     case visual        // Level B
     case transcribe    // Level C
     case ocr           // Level C
+    /// Who was speaking. Level D: opt-in, Apple silicon only, and the only task
+    /// whose models are not already on the machine.
+    case diarize
     case strongHash    // idle-only disambiguation
 
     /// Lower runs first.
@@ -283,6 +286,9 @@ public enum JobTask: String, Codable, Sendable, DatabaseValueConvertible, CaseIt
         case .visual: 10
         case .ocr: 20
         case .transcribe: 30
+        // After transcription: it is more expensive, less essential, and only
+        // meaningful once there is a transcript to attribute.
+        case .diarize: 40
         case .strongHash: 90
         }
     }
@@ -496,5 +502,80 @@ public struct PersonFeedback: Codable, Sendable, FetchableRecord, MutablePersist
         self.bPersonID = bPersonID
         self.faceID = faceID
         self.createdAt = createdAt
+    }
+}
+
+/// A voice the library has heard more than once.
+public struct Voice: Codable, Sendable, FetchableRecord, MutablePersistableRecord {
+    public static let databaseTableName = "voices"
+
+    public var voiceID: Int64?
+    public var personID: Int64?
+    public var centroid: Data?
+    public var segmentCount: Int
+    public var modelID: String
+    public var createdAt: Date
+    public var updatedAt: Date
+
+    public init(voiceID: Int64? = nil, personID: Int64? = nil, centroid: Data? = nil,
+                segmentCount: Int = 0, modelID: String,
+                createdAt: Date = Date(), updatedAt: Date = Date()) {
+        self.voiceID = voiceID
+        self.personID = personID
+        self.centroid = centroid
+        self.segmentCount = segmentCount
+        self.modelID = modelID
+        self.createdAt = createdAt
+        self.updatedAt = updatedAt
+    }
+
+    public var decodedCentroid: [Float]? {
+        centroid.map { VectorCodec.decodeFloat32($0) }
+    }
+}
+
+/// One stretch of one file where one person was speaking.
+public struct VoiceSegment: Codable, Sendable, FetchableRecord, MutablePersistableRecord {
+    public static let databaseTableName = "voice_segments"
+
+    public var segmentID: Int64?
+    public var assetID: Int64
+    public var startSeconds: Double
+    public var endSeconds: Double
+    /// The diarizer's label *within this file*: "Speaker 1" here has nothing to
+    /// do with "Speaker 1" in the next file. Clustering the embeddings is what
+    /// gives those labels meaning across a library.
+    public var localSpeaker: String
+    public var voiceID: Int64?
+    public var modelID: String
+    public var dimensions: Int
+    public var quantization: String
+    public var scale: Double
+    public var vector: Data?
+    public var confidence: Double?
+
+    public init(segmentID: Int64? = nil, assetID: Int64, startSeconds: Double,
+                endSeconds: Double, localSpeaker: String, voiceID: Int64? = nil,
+                modelID: String, dimensions: Int = 0,
+                quantization: String = VectorQuantization.int8.rawValue,
+                scale: Double = 1, vector: Data? = nil, confidence: Double? = nil) {
+        self.segmentID = segmentID
+        self.assetID = assetID
+        self.startSeconds = startSeconds
+        self.endSeconds = endSeconds
+        self.localSpeaker = localSpeaker
+        self.voiceID = voiceID
+        self.modelID = modelID
+        self.dimensions = dimensions
+        self.quantization = quantization
+        self.scale = scale
+        self.vector = vector
+        self.confidence = confidence
+    }
+
+    public var decodedVector: [Float]? {
+        guard let vector, dimensions > 0 else { return nil }
+        return VectorCodec.decode(vector, scale: scale,
+                                  quantization: VectorQuantization(rawValue: quantization) ?? .int8)
     }
 }

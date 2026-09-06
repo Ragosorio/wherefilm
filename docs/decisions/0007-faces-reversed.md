@@ -69,38 +69,51 @@ Not promises. Structure.
 
 Vision detects faces and exposes no identity embedding — the whole request list
 in macOS 26 has nothing that returns a faceprint — so the descriptor has to come
-from outside. The candidates (EdgeFace, ArcFace) are research-licensed
-conversions somebody has to install, and requiring that before any of this
-worked would have meant building the pipeline blind.
+from outside. The pipeline is therefore built against a `FaceEmbedder` protocol,
+and there are two implementations.
 
-So the pipeline is built against a `FaceEmbedder` protocol and ships with
-`VisionFeaturePrintEmbedder`, which uses `GenerateImageFeaturePrintRequest`.
-**That is not a face recognition model.** It describes pictures in general: two
-photographs of the same person in different light can score lower than two
-strangers photographed in the same room. It groups near-duplicates well and
-distinguishes people poorly.
+**`CoreMLFaceEmbedder` — AuraFace, and what to use.** A ResNet-100 trained with
+ArcFace's additive angular margin loss, published by fal under **Apache-2.0**
+and trained on commercially available data specifically so it can be used
+commercially. `Scripts/fetch-face-model.sh` installs it; 125 MB compiled.
 
-It is here because it makes everything around it real — cropping, quality
-gating, clustering, naming, merging, splitting, appearances and erasure are all
-implemented and tested against it — and because every vector records its
-`modelID`. Installing a proper model later changes that string, stops the old
-vectors from ever being compared with the new ones, and turns the same code into
-face recognition. That is the same mechanism `embeddings.modelID` has always
-used for the visual model, applied to the one place it matters even more.
+That licence is why it was chosen over the better-known options. InsightFace's
+own weights and EdgeFace are research-only, and this app is already research-only
+because MobileCLIP is. A *second* non-commercial model would have made that
+permanent. An Apache-2.0 one leaves exactly one thing to replace if this ever
+stops being a gift.
+
+**`VisionFeaturePrintEmbedder` — what happens without it.** The pipeline still
+runs, grouping faces with `GenerateImageFeaturePrintRequest`, and **that is not
+a face recognition model.** It describes pictures in general: two photographs of
+the same person in different light can score lower than two strangers
+photographed in the same room. It groups near-duplicates well and distinguishes
+people poorly. `wherefilm doctor` says which one is in use, in those words.
+
+Both record their `modelID` with every vector, so installing the real model
+after the fact is a background reindex and never a comparison between
+incompatible vectors — the same mechanism `embeddings.modelID` has always used
+for the visual model, applied to the one place it matters even more.
 
 ## What is not verified
 
-Detection quality end to end. The evaluation library is 43 photographs of
+Recognition quality end to end. The evaluation library is 43 photographs of
 landscapes and rendered text, and it verifies exactly one thing about faces:
 that none are found in it, which is the correct answer. Vision's detector cannot
 be exercised by synthetic faces — drawn ones are not detected at all, measured —
-so the honest position is that the clustering logic is tested and the recognition
-quality is unmeasured until it runs on real footage of real people.
+so there is no way to measure accuracy here without real footage of real people.
+
+What *is* verified about the model: it loads, its tensor layout is right
+(1×3×112×112, channels first, −1…1, half precision, all asserted), it returns
+512-dimensional unit vectors, it is deterministic for identical pixels, and it
+does not return the same vector for different ones — which is exactly what a
+mis-shaped tensor looks like, and how the half-precision bug was caught.
 
 ## Licence, if this ever stops being a gift
 
-EdgeFace is CC BY-NC-SA 4.0 and InsightFace's models are non-commercial. That
-does not change the situation the app is already in — MobileCLIP is
-research-licensed under `apple-ascl` — but it fixes it: a commercial version
-would need to replace *both* models. Both are behind an abstraction with a
-`modelID`, so that is a reindex, not a rewrite.
+One thing to replace, not two. MobileCLIP is research-licensed under
+`apple-ascl`; AuraFace is Apache-2.0 and FluidAudio's SDK is too (its pyannote
+weights are CC-BY-4.0, which requires attribution and permits commerce). So a
+commercial version needs a different *visual* model and nothing else — and since
+that model sits behind an abstraction with a `modelID`, swapping it is a
+background reindex rather than a rewrite.

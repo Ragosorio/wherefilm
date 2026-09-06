@@ -17,6 +17,10 @@ let package = Package(
         .package(url: "https://github.com/groue/GRDB.swift.git", from: "7.0.0"),
         .package(url: "https://github.com/unum-cloud/usearch.git", from: "2.20.0"),
         .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.4.0"),
+        // Speaker diarization. Apache-2.0 SDK over Core ML models; the pyannote
+        // weights it fetches are CC-BY-4.0. Apple silicon only, which is why
+        // everything that touches it degrades rather than requires it.
+        .package(url: "https://github.com/FluidInference/FluidAudio.git", from: "0.12.4"),
     ],
     targets: [
         .target(
@@ -32,7 +36,10 @@ let package = Package(
         ),
         .target(
             name: "WhereFilmIndex",
-            dependencies: ["WhereFilmCore", "WhereFilmML"]
+            dependencies: [
+                "WhereFilmCore", "WhereFilmML",
+                .product(name: "FluidAudio", package: "FluidAudio"),
+            ]
         ),
         .target(
             name: "WhereFilmSearch",

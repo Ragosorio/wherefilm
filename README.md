@@ -113,6 +113,72 @@ válida de medir Core ML y el Neural Engine en hardware real.
 | `doctor` | modelos, locales de voz, Apple Intelligence, aceleración SIMD |
 | `rebuild-index` | reconstruye el HNSW desde SQLite |
 | `tokenize <texto>` | cómo se tokeniza para el text encoder |
+| `eval [--no-llm]` | mide **calidad**: recall, MRR, nDCG, falsos positivos, calibración |
+| `calibrate --model s2` | qué vale una similitud en *esta* biblioteca |
+| `people` | ver, nombrar, fusionar y separar personas |
+| `voices` | quién habla, y a qué cara pertenece |
+| `sidecar export/import` | llevar un disco ya indexado a otra Mac |
+| `usage` | ver, activar o borrar el aprendizaje local |
+
+---
+
+## Personas: caras y voces
+
+Opcional, apagado por defecto, y con un botón de borrado que funciona. Es la
+única parte del producto que guarda **datos biométricos**, así que se enciende a
+mano o no existe.
+
+```bash
+./Scripts/fetch-face-model.sh      # AuraFace (ArcFace R100, Apache-2.0), 125 MB
+wherefilm index --faces
+wherefilm people                   # grupos encontrados, sin nombre todavía
+wherefilm people name 3 "Jorge Álvarez"
+wherefilm search "Jorge Alvarez"   # con o sin acento, y aguanta errores de dedo
+```
+
+Y quién habla, que no es lo mismo que quién sale:
+
+```bash
+wherefilm voices install           # una descarga, una vez, a mano
+wherefilm index --voices
+wherefilm voices list              # propone qué voz es qué cara
+wherefilm voices link 1 3          # confirmarlo es tu decisión, no del modelo
+```
+
+Las reglas que hacen esto aceptable están construidas, no prometidas: dos
+grupos con nombre **nunca** se fusionan solos, una separación es permanente, un
+pase automático no mueve una cara que pusiste tú, y
+
+```bash
+wherefilm people forget --yes
+```
+
+borra todas las caras, personas, voces y apariciones **sin tocar** archivos,
+momentos, transcripciones, texto en pantalla ni embeddings. Hay una prueba que
+lo verifica. El porqué de revertir la decisión original está en
+[ADR 7](docs/decisions/0007-faces-reversed.md).
+
+Dos límites, dichos claro: la diarización necesita Apple Silicon, y si no
+instalas el modelo de caras el sistema agrupa con un descriptor genérico que
+**no es reconocimiento facial** — `wherefilm doctor` te dice cuál está usando.
+
+## Llevar un disco indexado a otra Mac
+
+Indexar 30 TB una vez ya es caro. Hacerlo dos veces, en la Mac de al lado, no
+tiene sentido.
+
+```bash
+wherefilm sidecar export --volume <uuid> ~/Desktop/disco.wfindex
+# en la otra Mac
+wherefilm sidecar import ~/Desktop/disco.wfindex
+```
+
+Viaja el catálogo: assets, momentos, vectores, transcripciones, texto en
+pantalla, etiquetas y timecodes. **No viajan** las caras, las voces, el historial
+de uso ni los permisos de acceso de la Mac de origen. Verificado de punta a
+punta y entre arquitecturas — exportado desde el build `arm64`, importado en el
+`x86_64`, contestando las mismas búsquedas sin abrir un solo original: 43
+archivos en 360 KB.
 
 ---
 
@@ -411,6 +477,27 @@ desactivar ni evadir Gatekeeper: la app simplemente se aprueba una vez, por la
 persona dueña de la Mac. Con una licencia de Apple, `make-dmg.sh` solo necesita
 cambiar la identidad de firma y añadir `notarytool`.
 
+## Qué tan bien busca, medido
+
+Antes sólo se podía medir la latencia. `wherefilm eval` mide la **calidad**
+contra un set etiquetado de 58 consultas sobre una biblioteca real de 43
+archivos que `Scripts/make-eval-library.swift` construye desde lo que ya hay en
+la Mac.
+
+Dos reglas, las dos aprendidas por las malas:
+
+- La calidad **nunca** se mide con `bench-fixture`. Ese catálogo sintetiza
+  vectores a una distancia coseno elegida: sirve para latencia y memoria, y para
+  nada más.
+- La calidad se mide con `--no-llm`. El planificador on-device de Apple no es
+  determinista: tres corridas idénticas del mismo build dieron MRR 0,832 · 0,811
+  · 0,856. Ese ruido es más ancho que casi cualquier mejora que valga la pena
+  reclamar.
+
+El informe completo del paso de precisión, incluidas las tres cosas que
+midieron neutro o peor, está en
+[`docs/PRECISION-PASS-2026-09-05.md`](docs/PRECISION-PASS-2026-09-05.md).
+
 ## Estado
 
 Funciona de punta a punta, verificado en un MacBook Air M4 con material real:
@@ -483,6 +570,8 @@ Los iconos y la tarjeta de Open Graph se derivan del icono maestro con
 ## Documentación
 
 - [`docs/PLAN.md`](docs/PLAN.md) — el plan completo: decisiones, fases, riesgos, costos
+- [`docs/PLAN-02-PRECISION-PERSONAS-INTEL.md`](docs/PLAN-02-PRECISION-PERSONAS-INTEL.md) — el segundo plan: precisión, personas, Intel
+- [`docs/PRECISION-PASS-2026-09-05.md`](docs/PRECISION-PASS-2026-09-05.md) — qué midió cada fase, incluido lo que no funcionó
 - [`docs/decisions/`](docs/decisions/) — seis ADRs con el porqué de cada elección
 - [`docs/RESEARCH-NOTES.md`](docs/RESEARCH-NOTES.md) — de dónde salió todo esto
 - [`docs/PERFORMANCE-PASS-2026-09-02.md`](docs/PERFORMANCE-PASS-2026-09-02.md) — baseline, benchmark, calidad, recursos y límites del pase de velocidad

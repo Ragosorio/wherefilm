@@ -400,6 +400,146 @@ extension IndexStore {
         }
     }
 
+
+    // MARK: - Voices
+
+    @discardableResult
+    public func replaceVoiceSegments(assetID: Int64,
+                                     _ segments: [VoiceSegment]) throws -> [VoiceSegment] {
+        try dbPool.write { db in
+            try VoiceSegment.filter(Column("assetID") == assetID).deleteAll(db)
+            return try segments.map { segment in
+                var copy = segment
+                try copy.insert(db)
+                copy.segmentID = db.lastInsertedRowID
+                return copy
+            }
+        }
+    }
+
+    public func voiceSegments(assetID: Int64) throws -> [VoiceSegment] {
+        try dbPool.read { db in
+            try VoiceSegment.filter(Column("assetID") == assetID)
+                .order(Column("startSeconds")).fetchAll(db)
+        }
+    }
+
+    public func voiceSegments(voiceID: Int64, limit: Int = 500) throws -> [VoiceSegment] {
+        try dbPool.read { db in
+            try VoiceSegment.filter(Column("voiceID") == voiceID)
+                .order(Column("assetID"), Column("startSeconds")).limit(limit).fetchAll(db)
+        }
+    }
+
+    public func unassignedVoiceSegments(modelID: String, limit: Int = 2000) throws -> [VoiceSegment] {
+        try dbPool.read { db in
+            try VoiceSegment
+                .filter(Column("voiceID") == nil && Column("modelID") == modelID)
+                .order(Column("segmentID")).limit(limit).fetchAll(db)
+        }
+    }
+
+    public func voices() throws -> [Voice] {
+        try dbPool.read { db in
+            try Voice.order(Column("segmentCount").desc).fetchAll(db)
+        }
+    }
+
+    @discardableResult
+    public func createVoice(centroid: [Float], modelID: String) throws -> Voice {
+        try dbPool.write { db in
+            var voice = Voice(centroid: VectorCodec.encodeFloat32(centroid), modelID: modelID)
+            try voice.insert(db)
+            voice.voiceID = db.lastInsertedRowID
+            return voice
+        }
+    }
+
+    public func assign(segmentIDs: [Int64], to voiceID: Int64) throws {
+        guard !segmentIDs.isEmpty else { return }
+        try dbPool.write { db in
+            try db.execute(sql: """
+                UPDATE voice_segments SET voiceID = ?
+                WHERE segmentID IN (\(databaseQuestionMarks(count: segmentIDs.count)))
+                """, arguments: StatementArguments([voiceID] + segmentIDs.map { $0 as any DatabaseValueConvertible }))
+            try Self.refreshVoice(db, voiceID: voiceID)
+        }
+    }
+
+    /// Links a voice cluster to a person, which is what turns "somebody,
+    /// consistently" into "Jorge, speaking".
+    public func link(voiceID: Int64, to personID: Int64?) throws {
+        try dbPool.write { db in
+            try db.execute(sql: "UPDATE voices SET personID = ?, updatedAt = ? WHERE voiceID = ?",
+                           arguments: [personID, Date(), voiceID])
+        }
+    }
+
+    private static func refreshVoice(_ db: Database, voiceID: Int64) throws {
+        let rows = try VoiceSegment.filter(Column("voiceID") == voiceID).fetchAll(db)
+        let vectors = rows.compactMap(\.decodedVector)
+        guard let first = vectors.first else {
+            try db.execute(sql: "UPDATE voices SET segmentCount = 0, updatedAt = ? WHERE voiceID = ?",
+                           arguments: [Date(), voiceID])
+            return
+        }
+        var sum = [Float](repeating: 0, count: first.count)
+        for vector in vectors where vector.count == sum.count {
+            for index in vector.indices { sum[index] += vector[index] }
+        }
+        let centroid = VectorCodec.normalized(sum)
+        try db.execute(sql: """
+            UPDATE voices SET centroid = ?, segmentCount = ?, updatedAt = ? WHERE voiceID = ?
+            """, arguments: [VectorCodec.encodeFloat32(centroid), rows.count, Date(), voiceID])
+    }
+
+    /// How much time a voice and a person's face share, per asset.
+    ///
+    /// This is the bridge. A voice cluster and a face cluster that keep
+    /// overlapping in time, across several files, are very likely the same
+    /// person — and once they are linked, naming the face names the voice, so
+    /// "¿dónde habla Jorge?" works even in the shots where he is off camera.
+    ///
+    /// Returns seconds of overlap keyed by (voiceID, personID). Proposing the
+    /// link is as far as this goes: confirming it is a person's job, like every
+    /// other identity decision here.
+    public func voicePersonOverlap(minimumSeconds: Double = 3) throws -> [(voiceID: Int64, personID: Int64, seconds: Double)] {
+        try dbPool.read { db in
+            let rows = try Row.fetchAll(db, sql: """
+                SELECT vs.voiceID AS voiceID, pa.personID AS personID,
+                       SUM(MAX(0, MIN(vs.endSeconds, pa.endSeconds)
+                                - MAX(vs.startSeconds, pa.startSeconds))) AS seconds
+                FROM voice_segments vs
+                JOIN person_appearances pa
+                  ON pa.assetID = vs.assetID
+                 AND pa.startSeconds < vs.endSeconds
+                 AND pa.endSeconds > vs.startSeconds
+                WHERE vs.voiceID IS NOT NULL
+                GROUP BY vs.voiceID, pa.personID
+                HAVING seconds >= ?
+                ORDER BY seconds DESC
+                """, arguments: [minimumSeconds])
+            return rows.map { (voiceID: $0["voiceID"], personID: $0["personID"],
+                               seconds: $0["seconds"]) }
+        }
+    }
+
+    public struct VoiceStats: Sendable {
+        public let segments: Int
+        public let voices: Int
+        public let linked: Int
+    }
+
+    public func voiceStats() throws -> VoiceStats {
+        try dbPool.read { db in
+            VoiceStats(
+                segments: try Int.fetchOne(db, sql: "SELECT count(*) FROM voice_segments") ?? 0,
+                voices: try Int.fetchOne(db, sql: "SELECT count(*) FROM voices") ?? 0,
+                linked: try Int.fetchOne(
+                    db, sql: "SELECT count(*) FROM voices WHERE personID IS NOT NULL") ?? 0)
+        }
+    }
+
     // MARK: - Statistics and erasure
 
     public struct PeopleStats: Sendable {
@@ -431,6 +571,8 @@ extension IndexStore {
     /// the library keeps working exactly as it did before anyone was recognised.
     public func forgetEveryone() throws {
         try dbPool.write { db in
+            try db.execute(sql: "DELETE FROM voice_segments")
+            try db.execute(sql: "DELETE FROM voices")
             try db.execute(sql: "DELETE FROM person_appearances")
             try db.execute(sql: "DELETE FROM person_names")
             try db.execute(sql: "DELETE FROM people_feedback")
