@@ -16,6 +16,9 @@ struct PeopleView: View {
     /// keystroke.
     @State private var drafts: [Int64: String] = [:]
     @State private var confirmingForget = false
+    /// Which field is being typed in, so a name is saved when somebody clicks
+    /// away instead of only when they remember to press Return.
+    @FocusState private var focusedPerson: Int64?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -220,7 +223,14 @@ struct PeopleView: View {
                 .textFieldStyle(.roundedBorder)
                 .font(.callout)
                 .lineLimit(1)
+                .focused($focusedPerson, equals: card.id)
                 .onSubmit { commit(card.id) }
+                // Typing a name and clicking the next face is the natural way to
+                // work through a wall of strangers. Losing the name because
+                // nobody pressed Return would be the interface's fault.
+                .onChange(of: focusedPerson) { previous, _ in
+                    if previous == card.id { commit(card.id) }
+                }
 
             Text(detail(for: card))
                 .font(.caption2)
@@ -306,6 +316,11 @@ struct PeopleView: View {
 
     private func commit(_ personID: Int64) {
         guard let draft = drafts[personID] else { return }
+        // Only write when it actually changed: every focus change would
+        // otherwise rewrite the same name and log a correction that never
+        // happened.
+        let current = model.cards.first { $0.id == personID }?.name ?? ""
+        guard draft.trimmingCharacters(in: .whitespacesAndNewlines) != current else { return }
         model.name(personID, as: draft)
     }
 

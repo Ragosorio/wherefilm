@@ -145,10 +145,26 @@ Verified about the model: correct tensor layout (1×3×112×112, channels first,
 unit-length dimensions, deterministic for identical pixels, discriminating
 between different ones.
 
-Unverified: accuracy on actual people. 43 photographs of landscapes and text
-contain no faces — the correct answer, and confirmed — and synthetic faces are
-not detected at all (0/3 on carefully drawn ones). That measurement needs real
-footage.
+**Then measured on real faces.** `Scripts/fetch-face-fixture.sh` downloads
+freely licensed photographs of public figures from Wikimedia Commons — several
+per person, across years and photographers. Three things were wrong:
+
+| | same p50 | different p50 | F1 |
+|---|---|---|---|
+| padding 0.00 | 0.404 | 0.272 | 0.579 |
+| padding 0.15 | 0.511 | 0.326 | **0.647** |
+| padding 0.35 (was) | 0.492 | 0.363 | 0.512 |
+
+Eye alignment trades a little F1 for **precision 1.00 against 0.89**, which is
+the trade worth making: a person split across two clusters is one click to fix,
+two people merged into one is a wrong answer nobody notices. Thresholds follow
+from the same distributions — joining at 0.45, consolidating at 0.50, where 0.40
+collapses purity from 96% to 69%.
+
+End to end: **26 faces of four people → 16 groups, 96% purity**, one impure
+group holding one face each of two people. Naming one group and searching for it
+returns their photographs at 100% with `person` evidence, and the name survives
+two typos: `people where "Barak Obana"` finds Barack Obama.
 
 ### 14 · Voices
 
@@ -224,9 +240,9 @@ capabilities — people, portability, Intel — that did not exist.
 1. **Measure on Manu's real material.** Every "neutral" verdict above is
    neutral *on 43 landscape photographs*. Labels, reranking and faces are all
    waiting on an archive with people and things in it.
-2. **Run face recognition on real footage.** The model is installed and the
-   plumbing is proven; what nobody has measured is whether it groups Manu's
-   people correctly, which is the only question that matters.
+2. **Run face recognition on Manu's footage.** It is now measured on 26 faces of
+   four public figures; what nobody has measured is whether it groups *his*
+   people correctly, on material with motion blur, profiles and bad light.
 3. ~~Re-measure the S2 rerank with S2's own calibration.~~ Done, and the answer
    was no: `wherefilm calibrate` shows S0 and S2 separating right from wrong
    answers almost identically (medians 0.191/0.133 against 0.177/0.122), so the
