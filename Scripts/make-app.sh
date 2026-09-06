@@ -14,7 +14,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 CONFIG="${CONFIG:-release}"
-VERSION="${VERSION:-0.3.1}"
+VERSION="${VERSION:-0.4.0}"
 APP="build/WhereFilm.app"
 MODELS_DIR="${WHEREFILM_MODELS_DIR:-$HOME/Library/Application Support/WhereFilm/Models}"
 MIN_MACOS="${WHEREFILM_MIN_MACOS:-26.0}"

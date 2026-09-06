@@ -502,8 +502,9 @@ midieron neutro o peor, está en
 
 Funciona de punta a punta, verificado en un MacBook Air M4 con material real:
 búsqueda visual en inglés y español, transcripción en español con timestamps,
-OCR, detección de archivos movidos y borrados, previews offline. 69 pruebas
-pasando.
+OCR, etiquetas de escena, personas por cara y por voz, detección de archivos
+movidos y borrados, previews offline. 141 pruebas pasando, y la slice `x86_64`
+verificada vía Rosetta.
 
 El bundle se verifica con un comando, simulando una Mac limpia — sin modelos
 instalados y con un índice vacío — y dejando que la app haga todo el recorrido
